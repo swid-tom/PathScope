@@ -1,3 +1,41 @@
+const passwordForm = document.getElementById("passwordForm");
+const passwordMessage = document.getElementById("passwordMessage");
+
+passwordForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const newPassword = document.getElementById("newAdminPassword").value;
+  const confirmation = document.getElementById("confirmAdminPassword").value;
+  if (newPassword !== confirmation) {
+    passwordMessage.textContent = "The new passwords do not match.";
+    return;
+  }
+
+  const submitButton = passwordForm.querySelector("button[type='submit']");
+  submitButton.disabled = true;
+  passwordMessage.textContent = "Updating password...";
+  try {
+    const response = await fetch("/api/admin/password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ new_password: newPassword }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      passwordMessage.textContent = result.detail || "Could not update the admin password.";
+      submitButton.disabled = false;
+      return;
+    }
+
+    passwordForm.reset();
+    passwordMessage.textContent = "Password updated. Sign in again with your new password...";
+    window.setTimeout(() => window.location.replace("/admin"), 500);
+  } catch (error) {
+    passwordMessage.textContent = `Could not update the admin password: ${error.message}`;
+    submitButton.disabled = false;
+  }
+});
+
+if (document.body.dataset.passwordChangeRequired !== "true") {
 const targetForm = document.getElementById("targetForm");
 const targetRows = document.getElementById("targetRows");
 const targetMessage = document.getElementById("targetMessage");
@@ -254,3 +292,4 @@ vacuumBtn.addEventListener("click", async () => {
 loadTargets();
 loadRetentionSettings();
 clearForm();
+}

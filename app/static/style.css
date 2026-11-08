@@ -498,6 +498,15 @@ button.danger:hover { border-color: var(--bad); }
 }
 
 .target-admin h2 { margin-top: 0; }
+.password-admin { border-color: var(--accent); }
+.password-admin .password-warning {
+  color: var(--warn-text);
+  font-weight: 600;
+}
+.password-admin form.admin-grid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+.password-admin form.admin-grid button { min-height: 42px; }
 
 .target-admin form {
   display: grid;
@@ -785,6 +794,7 @@ button.danger:hover { border-color: var(--bad); }
 
 .alert-item.critical { border-left-color: var(--bad); }
 .alert-item.warning { border-left-color: var(--warn); }
+.alert-item.info { border-left-color: var(--good); }
 .alert-item span, .alert-item small, .alert-empty { color: var(--muted); }
 
 .alert-row-main {

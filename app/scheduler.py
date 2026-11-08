@@ -14,6 +14,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from app.config import AppConfig, TargetConfig
 from app.db import AlertEvent, Hop, PortCheck, Run, SessionLocal
 from app.probes import dns_probe, endpoint_probe, geoip, mtr_probe, port_probe, tls_probe
+from app.queries import effective_path_hop
 
 log = logging.getLogger("pathscope.scheduler")
 
@@ -45,14 +46,6 @@ def _path_signature_from_hubs(hubs: list[dict]) -> str:
     return "|".join(_path_hosts_from_hubs(hubs))
 
 
-def _effective_hop(session, run_id: int) -> Optional[Hop]:
-    hops = session.query(Hop).filter(Hop.run_id == run_id).order_by(Hop.hop_num.desc()).all()
-    for hop in hops:
-        if hop.host != "???" and hop.avg_ms is not None and not (hop.loss_pct == 100.0 and hop.avg_ms == 0.0):
-            return hop
-    return hops[0] if hops else None
-
-
 def _record_alert(session, cfg: AppConfig, run: Run, severity: str, kind: str, message: str, details: Optional[dict] = None) -> None:
     if not cfg.alert_enabled:
         return
@@ -67,17 +60,52 @@ def _record_alert(session, cfg: AppConfig, run: Run, severity: str, kind: str, m
     session.add(event)
     if cfg.alert_webhook_url:
         try:
-            requests.post(
+            response = requests.post(
                 cfg.alert_webhook_url,
                 json={"target": run.target, "severity": severity, "kind": kind, "message": message, "run_id": run.id, "details": details or {}},
                 timeout=5,
             )
+            response.raise_for_status()
         except requests.RequestException:
             log.exception("alert webhook failed for %s", run.target)
 
 
 def _evaluate_alerts(session, cfg: AppConfig, target: TargetConfig, run: Run) -> None:
-    hop = _effective_hop(session, run.id)
+    if not cfg.alert_enabled:
+        return
+
+    previous_run = (
+        session.query(Run)
+        .filter(Run.target == run.target, Run.id < run.id)
+        .order_by(Run.id.desc())
+        .first()
+    )
+    if not run.success:
+        if previous_run is None or previous_run.success:
+            message = run.error or "Network path probe failed"
+            _record_alert(
+                session,
+                cfg,
+                run,
+                "critical",
+                "probe_failure",
+                f"Probe failed: {message}",
+                {"error": message, "previous_run_id": previous_run.id if previous_run else None},
+            )
+        return
+
+    if previous_run is not None and not previous_run.success:
+        _record_alert(
+            session,
+            cfg,
+            run,
+            "info",
+            "probe_recovery",
+            "Probe recovered",
+            {"previous_run_id": previous_run.id, "previous_error": previous_run.error},
+        )
+
+    hop = effective_path_hop(session, run.id)
     if not hop:
         return
     latency_ms = target.alert_latency_ms if target.alert_latency_ms is not None else cfg.alert_latency_ms
@@ -248,8 +276,7 @@ def probe_target(target: TargetConfig, cfg: AppConfig) -> None:
                 )
 
             session.flush()
-            _evaluate_alerts(session, cfg, target, run)
-
+        _evaluate_alerts(session, cfg, target, run)
         session.commit()
     except Exception:
         log.exception("probe_target failed for %s", target.host)

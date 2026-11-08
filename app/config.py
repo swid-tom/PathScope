@@ -57,6 +57,8 @@ class AppConfig:
     admin_auth_enabled: bool
     admin_auth_username: str
     admin_auth_password_sha256: str | None
+    admin_auth_password_change_required: bool
+    read_api_auth_required: bool
 
 
 def load_config(path: str = CONFIG_PATH) -> AppConfig:
@@ -91,6 +93,15 @@ def load_config(path: str = CONFIG_PATH) -> AppConfig:
     baseline = raw.get("baseline", {})
     alerts = raw.get("alerts", {})
     admin_auth = raw.get("admin_auth", {})
+    environment_admin_hash = os.environ.get("PATHSCOPE_ADMIN_PASSWORD_SHA256")
+    configured_admin_hash = os.environ.get(
+        "PATHSCOPE_ADMIN_PASSWORD_SHA256", admin_auth.get("password_sha256")
+    )
+    password_change_required = (
+        False
+        if environment_admin_hash
+        else admin_auth.get("password_change_required", not bool(configured_admin_hash))
+    )
 
     return AppConfig(
         targets=targets,
@@ -119,5 +130,10 @@ def load_config(path: str = CONFIG_PATH) -> AppConfig:
         alert_path_change=alerts.get("path_change", True),
         admin_auth_enabled=os.environ.get("PATHSCOPE_ADMIN_AUTH_ENABLED", str(admin_auth.get("enabled", False))).lower() in ("1", "true", "yes", "on"),
         admin_auth_username=os.environ.get("PATHSCOPE_ADMIN_USERNAME", admin_auth.get("username", "admin")),
-        admin_auth_password_sha256=os.environ.get("PATHSCOPE_ADMIN_PASSWORD_SHA256", admin_auth.get("password_sha256")),
+        admin_auth_password_sha256=configured_admin_hash,
+        admin_auth_password_change_required=bool(password_change_required),
+        read_api_auth_required=os.environ.get(
+            "PATHSCOPE_READ_API_AUTH_REQUIRED",
+            str(raw.get("read_api_auth_required", False)),
+        ).lower() in ("1", "true", "yes", "on"),
     )

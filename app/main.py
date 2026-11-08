@@ -11,7 +11,6 @@ import os
 import secrets
 from typing import List, Optional
 
-import yaml
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -22,7 +21,16 @@ from sqlalchemy import text
 from starlette.requests import Request
 
 from app.config import CONFIG_PATH, TargetConfig, load_config
+from app.config_store import update_config_file, update_config_section
 from app.db import AlertEvent, DB_PATH, Hop, PortCheck, Run, SessionLocal, engine, init_db
+from app.queries import (
+    baseline_for_target,
+    classify_status,
+    effective_path_hop,
+    effective_path_hops,
+    quality_score,
+    service_reachability,
+)
 from app.scheduler import schedule_target_probe, start_scheduler, unschedule_target_probe
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -31,6 +39,8 @@ app = FastAPI(title="PathScope — Network Path & Edge Monitor")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
 security = HTTPBasic(auto_error=False)
+MAX_CHART_POINTS = 2000
+BOOTSTRAP_ADMIN_PASSWORD_SHA256 = "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"
 
 cfg = load_config()
 scheduler = None
@@ -57,6 +67,10 @@ class RetentionSettings(BaseModel):
     retention_days: int = Field(ge=1, le=3650)
 
 
+class AdminPasswordChange(BaseModel):
+    new_password: str = Field(min_length=12, max_length=128)
+
+
 def require_admin(credentials: HTTPBasicCredentials | None = Depends(security)) -> None:
     if not cfg.admin_auth_enabled:
         return
@@ -78,11 +92,47 @@ def require_admin(credentials: HTTPBasicCredentials | None = Depends(security)) 
         )
 
 
+def require_admin_ready(credentials: HTTPBasicCredentials | None = Depends(security)) -> None:
+    require_admin(credentials)
+    if cfg.admin_auth_enabled and cfg.admin_auth_password_change_required:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Change the default admin password before using other admin actions",
+        )
+
+
+def require_read_api_auth(credentials: HTTPBasicCredentials | None = Depends(security)) -> None:
+    if not cfg.read_api_auth_required:
+        return
+    if not cfg.admin_auth_enabled or not cfg.admin_auth_password_sha256:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Read API authentication is enabled but admin credentials are not configured",
+        )
+    require_admin(credentials)
+
+
 @app.on_event("startup")
 def on_startup() -> None:
     global scheduler
+    _initialize_bootstrap_admin_password()
     init_db()
     scheduler = start_scheduler(cfg)
+
+
+def _initialize_bootstrap_admin_password() -> None:
+    if not cfg.admin_auth_enabled or cfg.admin_auth_password_sha256:
+        return
+    cfg.admin_auth_password_sha256 = BOOTSTRAP_ADMIN_PASSWORD_SHA256
+    cfg.admin_auth_password_change_required = True
+    update_config_section(
+        CONFIG_PATH,
+        "admin_auth",
+        {
+            "password_sha256": BOOTSTRAP_ADMIN_PASSWORD_SHA256,
+            "password_change_required": True,
+        },
+    )
 
 
 @app.get("/")
@@ -95,7 +145,44 @@ def dashboard(request: Request):
 
 @app.get("/admin")
 def admin(request: Request, _auth: None = Depends(require_admin)):
-    return templates.TemplateResponse("admin.html", {"request": request})
+    return templates.TemplateResponse(
+        "admin.html",
+        {
+            "request": request,
+            "password_change_required": (
+                cfg.admin_auth_enabled and cfg.admin_auth_password_change_required
+            ),
+            "admin_auth_enabled": cfg.admin_auth_enabled,
+            "env_password_managed": bool(os.environ.get("PATHSCOPE_ADMIN_PASSWORD_SHA256")),
+        },
+    )
+
+
+@app.post("/api/admin/password")
+def api_change_admin_password(
+    password: AdminPasswordChange,
+    _auth: None = Depends(require_admin),
+):
+    if not cfg.admin_auth_enabled:
+        raise HTTPException(status_code=409, detail="Admin authentication is disabled")
+    if os.environ.get("PATHSCOPE_ADMIN_PASSWORD_SHA256"):
+        raise HTTPException(
+            status_code=409,
+            detail="The admin password is managed by PATHSCOPE_ADMIN_PASSWORD_SHA256",
+        )
+
+    password_hash = hashlib.sha256(password.new_password.encode("utf-8")).hexdigest()
+    update_config_section(
+        CONFIG_PATH,
+        "admin_auth",
+        {
+            "password_sha256": password_hash,
+            "password_change_required": False,
+        },
+    )
+    cfg.admin_auth_password_sha256 = password_hash
+    cfg.admin_auth_password_change_required = False
+    return {"password_updated": True}
 
 
 @app.get("/alerts")
@@ -106,14 +193,19 @@ def alerts(request: Request):
 def _window_start(window: str) -> dt.datetime:
     now = dt.datetime.utcnow()
     mapping = {"1h": 1, "24h": 24, "7d": 24 * 7, "30d": 24 * 30}
-    hours = mapping.get(window, 24)
+    if window not in mapping:
+        raise HTTPException(status_code=400, detail="window must be one of 1h, 24h, 7d, 30d, or custom")
+    hours = mapping[window]
     return now - dt.timedelta(hours=hours)
 
 
 def _parse_client_datetime(value: Optional[str]) -> Optional[dt.datetime]:
     if not value:
         return None
-    parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid datetime: {value}") from exc
     if parsed.tzinfo is not None:
         return parsed.astimezone(dt.timezone.utc).replace(tzinfo=None)
     return parsed
@@ -124,50 +216,21 @@ def _time_range(window: str, start: Optional[str], end: Optional[str]) -> tuple[
         start_dt = _parse_client_datetime(start)
         if start_dt is None:
             raise HTTPException(status_code=400, detail="custom window requires start")
-        return start_dt, _parse_client_datetime(end)
+        end_dt = _parse_client_datetime(end)
+        if end_dt is not None and end_dt <= start_dt:
+            raise HTTPException(status_code=400, detail="custom window end must be after start")
+        return start_dt, end_dt
     return _window_start(window), None
 
 
-def _effective_path_hop(session, run_id: int):
-    hops = session.query(Hop).filter(Hop.run_id == run_id).order_by(Hop.hop_num.desc()).all()
-    for hop in hops:
-        if hop.host != "???" and hop.avg_ms is not None and not (hop.loss_pct == 100.0 and hop.avg_ms == 0.0):
-            return hop
-    return hops[0] if hops else None
-
-
-def _has_successful_port_check(session, run_id: int) -> bool:
-    return session.query(PortCheck).filter(PortCheck.run_id == run_id, PortCheck.success.is_(True)).first() is not None
-
-
-def _baseline_for_target(session, target: str, before: dt.datetime) -> dict:
-    since = before - dt.timedelta(days=cfg.baseline_days)
-    runs = (
-        session.query(Run)
-        .filter(Run.target == target, Run.timestamp >= since, Run.timestamp < before, Run.success.is_(True))
-        .order_by(Run.timestamp.asc())
-        .all()
-    )
-    latencies = []
-    jitters = []
-    losses = []
-    for run in runs:
-        hop = _effective_path_hop(session, run.id)
-        if not hop:
-            continue
-        if hop.avg_ms is not None:
-            latencies.append(hop.avg_ms)
-        if hop.stdev_ms is not None:
-            jitters.append(hop.stdev_ms)
-        if hop.loss_pct is not None:
-            losses.append(hop.loss_pct)
-
-    return {
-        "samples": len(latencies),
-        "latency_ms": sum(latencies) / len(latencies) if latencies else None,
-        "jitter_ms": sum(jitters) / len(jitters) if jitters else None,
-        "loss_pct": sum(losses) / len(losses) if losses else None,
-    }
+def _sample_chart_runs(runs: list[Run]) -> list[Run]:
+    if len(runs) <= MAX_CHART_POINTS:
+        return runs
+    last_index = len(runs) - 1
+    return [
+        runs[round(index * last_index / (MAX_CHART_POINTS - 1))]
+        for index in range(MAX_CHART_POINTS)
+    ]
 
 
 def _pct_delta(value: float | None, baseline: float | None) -> float | None:
@@ -186,83 +249,13 @@ def _json_list(value: str | None) -> list[str]:
         return []
 
 
-def _quality_score(run: Run, hop, ports: list[PortCheck]) -> dict:
-    score = 100.0
-    reasons = []
-
-    if not run.success:
-        return {"score": 0, "grade": "Down", "reasons": [run.error or "probe failed"]}
-
-    latency = run.endpoint_avg_ms if run.endpoint_avg_ms is not None else hop.avg_ms if hop else None
-    jitter = run.endpoint_jitter_ms if run.endpoint_jitter_ms is not None else hop.stdev_ms if hop else None
-    loss = run.endpoint_loss_pct if run.endpoint_loss_pct is not None else hop.loss_pct if hop else None
-
-    if latency is not None:
-        if latency > 300:
-            score -= 30
-            reasons.append(f"high latency {latency:.0f} ms")
-        elif latency > 200:
-            score -= 18
-            reasons.append(f"elevated latency {latency:.0f} ms")
-        elif latency > 150:
-            score -= 10
-            reasons.append(f"latency above preferred {latency:.0f} ms")
-
-    if jitter is not None:
-        if jitter > 60:
-            score -= 25
-            reasons.append(f"high jitter {jitter:.0f} ms")
-        elif jitter > 35:
-            score -= 14
-            reasons.append(f"elevated jitter {jitter:.0f} ms")
-        elif jitter > 20:
-            score -= 7
-            reasons.append(f"jitter above preferred {jitter:.0f} ms")
-
-    if loss is not None:
-        if loss >= 5:
-            score -= 35
-            reasons.append(f"packet loss {loss:.1f}%")
-        elif loss >= 2:
-            score -= 22
-            reasons.append(f"packet loss {loss:.1f}%")
-        elif loss > 0:
-            score -= 10
-            reasons.append(f"minor loss {loss:.1f}%")
-
-    if run.path_changed:
-        score -= 8
-        reasons.append("path changed")
-
-    if run.dns_ms is not None and run.dns_ms > 250:
-        score -= 5
-        reasons.append(f"slow DNS {run.dns_ms:.0f} ms")
-
-    failed_ports = [p for p in ports if not p.success]
-    if failed_ports:
-        score -= min(30, 15 * len(failed_ports))
-        reasons.append("one or more port/TLS checks failed")
-
-    score = max(0, min(100, round(score)))
-    if score >= 90:
-        grade = "Excellent"
-    elif score >= 75:
-        grade = "Good"
-    elif score >= 60:
-        grade = "Degraded"
-    else:
-        grade = "Poor"
-
-    return {"score": score, "grade": grade, "reasons": reasons or ["all measured signals healthy"]}
-
-
 @app.get("/api/targets")
-def api_targets():
+def api_targets(_auth: None = Depends(require_read_api_auth)):
     return [_target_to_dict(t) for t in cfg.targets]
 
 
 @app.post("/api/targets", status_code=201)
-def api_add_target(target: TargetCreate, _auth: None = Depends(require_admin)):
+def api_add_target(target: TargetCreate, _auth: None = Depends(require_admin_ready)):
     host = target.host.strip().lower()
     label = (target.label or host).strip()
     tcp_ports = sorted(set(target.tcp_ports or []))
@@ -288,8 +281,8 @@ def api_add_target(target: TargetCreate, _auth: None = Depends(require_admin)):
         endpoint_probe_port=target.endpoint_probe_port,
         dscp=target.dscp,
     )
+    _save_targets_to_config([*cfg.targets, new_target])
     cfg.targets.append(new_target)
-    _save_targets_to_config()
 
     if scheduler is not None:
         schedule_target_probe(scheduler, cfg, new_target)
@@ -298,7 +291,7 @@ def api_add_target(target: TargetCreate, _auth: None = Depends(require_admin)):
 
 
 @app.put("/api/targets/{host}")
-def api_update_target(host: str, target: TargetCreate, _auth: None = Depends(require_admin)):
+def api_update_target(host: str, target: TargetCreate, _auth: None = Depends(require_admin_ready)):
     normalized_host = host.strip().lower()
     existing = next((item for item in cfg.targets if item.host == normalized_host), None)
     if existing is None:
@@ -308,36 +301,44 @@ def api_update_target(host: str, target: TargetCreate, _auth: None = Depends(req
     if any(port < 1 or port > 65535 for port in tcp_ports):
         raise HTTPException(status_code=400, detail="tcp_ports must be between 1 and 65535")
 
-    existing.label = (target.label or existing.host).strip()
-    existing.tcp_ports = tcp_ports
-    existing.mtr_protocol = target.mtr_protocol
-    existing.mtr_port = target.mtr_port
-    existing.alert_latency_ms = target.alert_latency_ms
-    existing.alert_jitter_ms = target.alert_jitter_ms
-    existing.alert_loss_pct = target.alert_loss_pct
-    existing.alert_path_change = target.alert_path_change
-    existing.endpoint_probe_enabled = target.endpoint_probe_enabled
-    existing.endpoint_probe_protocol = target.endpoint_probe_protocol
-    existing.endpoint_probe_count = target.endpoint_probe_count
-    existing.endpoint_probe_port = target.endpoint_probe_port
-    existing.dscp = target.dscp
-    _save_targets_to_config()
+    updated_target = TargetConfig(
+        host=existing.host,
+        label=(target.label or existing.host).strip(),
+        tcp_ports=tcp_ports,
+        mtr_protocol=target.mtr_protocol,
+        mtr_port=target.mtr_port,
+        alert_latency_ms=target.alert_latency_ms,
+        alert_jitter_ms=target.alert_jitter_ms,
+        alert_loss_pct=target.alert_loss_pct,
+        alert_path_change=target.alert_path_change,
+        endpoint_probe_enabled=target.endpoint_probe_enabled,
+        endpoint_probe_protocol=target.endpoint_probe_protocol,
+        endpoint_probe_count=target.endpoint_probe_count,
+        endpoint_probe_port=target.endpoint_probe_port,
+        dscp=target.dscp,
+    )
+    target_index = cfg.targets.index(existing)
+    updated_targets = list(cfg.targets)
+    updated_targets[target_index] = updated_target
+    _save_targets_to_config(updated_targets)
+    cfg.targets[target_index] = updated_target
 
     if scheduler is not None:
-        schedule_target_probe(scheduler, cfg, existing)
+        schedule_target_probe(scheduler, cfg, updated_target)
 
-    return _target_to_dict(existing)
+    return _target_to_dict(updated_target)
 
 
 @app.delete("/api/targets/{host}")
-def api_delete_target(host: str, delete_history: bool = Query(False), _auth: None = Depends(require_admin)):
+def api_delete_target(host: str, delete_history: bool = Query(False), _auth: None = Depends(require_admin_ready)):
     normalized_host = host.strip().lower()
     existing = next((target for target in cfg.targets if target.host == normalized_host), None)
     if existing is None:
         raise HTTPException(status_code=404, detail="target not found")
 
-    cfg.targets = [target for target in cfg.targets if target.host != normalized_host]
-    _save_targets_to_config()
+    updated_targets = [target for target in cfg.targets if target.host != normalized_host]
+    _save_targets_to_config(updated_targets)
+    cfg.targets = updated_targets
 
     if scheduler is not None:
         unschedule_target_probe(scheduler, normalized_host)
@@ -353,14 +354,14 @@ def api_get_retention_settings(_auth: None = Depends(require_admin)):
 
 
 @app.put("/api/settings/retention")
-def api_update_retention_settings(settings: RetentionSettings, _auth: None = Depends(require_admin)):
+def api_update_retention_settings(settings: RetentionSettings, _auth: None = Depends(require_admin_ready)):
+    _save_retention_to_config(settings.retention_days)
     cfg.retention_days = settings.retention_days
-    _save_retention_to_config()
     return api_get_retention_settings()
 
 
 @app.get("/api/maintenance/stats")
-def api_maintenance_stats():
+def api_maintenance_stats(_auth: None = Depends(require_read_api_auth)):
     session = SessionLocal()
     try:
         return {
@@ -375,7 +376,7 @@ def api_maintenance_stats():
 
 
 @app.post("/api/maintenance/prune")
-def api_maintenance_prune(retention_days: int = Query(30, ge=1, le=3650), _auth: None = Depends(require_admin)):
+def api_maintenance_prune(retention_days: int = Query(30, ge=1, le=3650), _auth: None = Depends(require_admin_ready)):
     session = SessionLocal()
     try:
         cutoff = dt.datetime.utcnow() - dt.timedelta(days=retention_days)
@@ -391,7 +392,7 @@ def api_maintenance_prune(retention_days: int = Query(30, ge=1, le=3650), _auth:
 
 
 @app.post("/api/maintenance/vacuum")
-def api_maintenance_vacuum(_auth: None = Depends(require_admin)):
+def api_maintenance_vacuum(_auth: None = Depends(require_admin_ready)):
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
         conn.execute(text("VACUUM"))
@@ -421,24 +422,14 @@ def _delete_runs_by_id(session, run_ids: List[int]) -> int:
     return deleted
 
 
-def _save_targets_to_config() -> None:
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
-
-    raw["targets"] = [_target_to_config(target) for target in cfg.targets]
-
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        yaml.safe_dump(raw, f, sort_keys=False)
+def _save_targets_to_config(targets: list[TargetConfig] | None = None) -> None:
+    config_targets = cfg.targets if targets is None else targets
+    update_config_file(CONFIG_PATH, {"targets": [_target_to_config(target) for target in config_targets]})
 
 
-def _save_retention_to_config() -> None:
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
-
-    raw["retention_days"] = cfg.retention_days
-
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        yaml.safe_dump(raw, f, sort_keys=False)
+def _save_retention_to_config(retention_days: int | None = None) -> None:
+    config_retention_days = cfg.retention_days if retention_days is None else retention_days
+    update_config_file(CONFIG_PATH, {"retention_days": config_retention_days})
 
 
 def _target_to_dict(target: TargetConfig) -> dict:
@@ -511,6 +502,7 @@ def api_status(
     latency_critical_ms: float = Query(300.0),
     loss_warning_pct: float = Query(2.0),
     loss_critical_pct: float = Query(10.0),
+    _auth: None = Depends(require_read_api_auth),
 ):
     """RAG (green/amber/red) rollup for a target, for external monitoring dashboards."""
     session = SessionLocal()
@@ -527,31 +519,23 @@ def api_status(
                 "timestamp": run.timestamp.isoformat() + "Z",
             }
 
-        last_hop = _effective_path_hop(session, run.id)
+        last_hop = effective_path_hop(session, run.id)
         avg_ms = last_hop.avg_ms if last_hop else None
         loss_pct = last_hop.loss_pct if last_hop else None
         jitter_ms = last_hop.stdev_ms if last_hop else None
-        port_reachable = _has_successful_port_check(session, run.id)
         ports = session.query(PortCheck).filter(PortCheck.run_id == run.id).all()
-        quality = _quality_score(run, last_hop, ports)
+        reachable = service_reachability(run, ports)
+        quality = quality_score(run, last_hop, ports)
 
-        status = "green"
-        reasons = []
-        if not port_reachable:
-            status = "red"
-            reasons.append("service port unreachable")
-        elif loss_pct is not None and loss_pct >= loss_critical_pct:
-            status = "red"
-            reasons.append(f"{loss_pct:.1f}% loss")
-        elif avg_ms is not None and avg_ms >= latency_critical_ms:
-            status = "red"
-            reasons.append(f"{avg_ms:.0f}ms latency")
-        elif loss_pct is not None and loss_pct >= loss_warning_pct:
-            status = "amber"
-            reasons.append(f"{loss_pct:.1f}% loss")
-        elif avg_ms is not None and avg_ms >= latency_warning_ms:
-            status = "amber"
-            reasons.append(f"{avg_ms:.0f}ms latency")
+        status, reasons = classify_status(
+            avg_ms,
+            loss_pct,
+            reachable,
+            latency_warning_ms,
+            latency_critical_ms,
+            loss_warning_pct,
+            loss_critical_pct,
+        )
 
         status_text = "OK" if status == "green" else "; ".join(reasons)
 
@@ -575,7 +559,7 @@ def api_status(
             "endpoint_avg_ms": run.endpoint_avg_ms,
             "endpoint_loss_pct": run.endpoint_loss_pct,
             "endpoint_jitter_ms": run.endpoint_jitter_ms,
-            "service_reachable": port_reachable,
+            "service_reachable": reachable,
             "quality": quality,
             "path_changed": bool(run.path_changed),
             "hop_count": last_hop.hop_num if last_hop else None,
@@ -586,7 +570,7 @@ def api_status(
 
 
 @app.get("/api/latest")
-def api_latest():
+def api_latest(_auth: None = Depends(require_read_api_auth)):
     session = SessionLocal()
     try:
         out = []
@@ -601,10 +585,10 @@ def api_latest():
                 out.append({"target": t.host, "label": t.label, "status": "no data"})
                 continue
 
-            last_hop = _effective_path_hop(session, run.id)
-            baseline = _baseline_for_target(session, t.host, run.timestamp)
+            last_hop = effective_path_hop(session, run.id)
+            baseline = baseline_for_target(session, t.host, run.timestamp, cfg.baseline_days)
             ports = session.query(PortCheck).filter(PortCheck.run_id == run.id).all()
-            quality = _quality_score(run, last_hop, ports)
+            quality = quality_score(run, last_hop, ports)
             out.append(
                 {
                     "target": t.host,
@@ -654,7 +638,11 @@ def api_latest():
 
 
 @app.get("/api/alerts")
-def api_alerts(limit: int = Query(50, ge=1, le=500), recent_minutes: Optional[int] = Query(None, ge=1, le=10080)):
+def api_alerts(
+    limit: int = Query(50, ge=1, le=500),
+    recent_minutes: Optional[int] = Query(None, ge=1, le=10080),
+    _auth: None = Depends(require_read_api_auth),
+):
     session = SessionLocal()
     try:
         query = session.query(AlertEvent)
@@ -680,7 +668,7 @@ def api_alerts(limit: int = Query(50, ge=1, le=500), recent_minutes: Optional[in
 
 
 @app.delete("/api/alerts")
-def api_clear_alerts(_auth: None = Depends(require_admin)):
+def api_clear_alerts(_auth: None = Depends(require_admin_ready)):
     session = SessionLocal()
     try:
         deleted = session.query(AlertEvent).delete(synchronize_session=False)
@@ -694,7 +682,13 @@ def api_clear_alerts(_auth: None = Depends(require_admin)):
 
 
 @app.get("/api/summary")
-def api_summary(target: str, window: str = "24h", start: Optional[str] = None, end: Optional[str] = None):
+def api_summary(
+    target: str,
+    window: str = "24h",
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    _auth: None = Depends(require_read_api_auth),
+):
     """Time series of destination (last hop) latency + loss for charting."""
     session = SessionLocal()
     try:
@@ -702,10 +696,11 @@ def api_summary(target: str, window: str = "24h", start: Optional[str] = None, e
         query = session.query(Run).filter(Run.target == target, Run.timestamp >= since)
         if until is not None:
             query = query.filter(Run.timestamp <= until)
-        runs = query.order_by(Run.timestamp.asc()).all()
+        runs = _sample_chart_runs(query.order_by(Run.timestamp.asc()).all())
+        hops_by_run = effective_path_hops(session, [run.id for run in runs])
         points = []
         for run in runs:
-            last_hop = _effective_path_hop(session, run.id)
+            last_hop = hops_by_run.get(run.id)
             points.append(
                 {
                     "timestamp": run.timestamp.isoformat() + "Z",
@@ -726,7 +721,14 @@ def api_summary(target: str, window: str = "24h", start: Optional[str] = None, e
 
 
 @app.get("/api/runs")
-def api_runs(target: str, window: str = "24h", limit: int = 200, start: Optional[str] = None, end: Optional[str] = None):
+def api_runs(
+    target: str,
+    window: str = "24h",
+    limit: int = Query(200, ge=1, le=5000),
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    _auth: None = Depends(require_read_api_auth),
+):
     session = SessionLocal()
     try:
         since, until = _time_range(window, start, end)
@@ -762,7 +764,7 @@ def api_runs(target: str, window: str = "24h", limit: int = 200, start: Optional
 
 
 @app.get("/api/runs/{run_id}/hops")
-def api_run_hops(run_id: int):
+def api_run_hops(run_id: int, _auth: None = Depends(require_read_api_auth)):
     session = SessionLocal()
     try:
         run = session.get(Run, run_id)
@@ -792,7 +794,13 @@ def api_run_hops(run_id: int):
 
 
 @app.get("/api/export.csv")
-def api_export_csv(target: str, window: str = "24h", start: Optional[str] = None, end: Optional[str] = None):
+def api_export_csv(
+    target: str,
+    window: str = "24h",
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    _auth: None = Depends(require_read_api_auth),
+):
     session = SessionLocal()
     try:
         since, until = _time_range(window, start, end)
@@ -800,6 +808,7 @@ def api_export_csv(target: str, window: str = "24h", start: Optional[str] = None
         if until is not None:
             query = query.filter(Run.timestamp <= until)
         runs = query.order_by(Run.timestamp.asc()).all()
+        hops_by_run = effective_path_hops(session, [run.id for run in runs])
 
         buf = io.StringIO()
         writer = csv.writer(buf)
@@ -811,7 +820,7 @@ def api_export_csv(target: str, window: str = "24h", start: Optional[str] = None
             ]
         )
         for run in runs:
-            last_hop = _effective_path_hop(session, run.id)
+            last_hop = hops_by_run.get(run.id)
             writer.writerow(
                 [
                     run.timestamp.isoformat() + "Z",

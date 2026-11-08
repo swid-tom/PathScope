@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <title>PathScope Admin</title>
-  <link rel="stylesheet" href="/static/style.css?v=compact-header-2" />
+  <link rel="stylesheet" href="/static/style.css?v=admin-password-1" />
   <script src="/static/theme.js?v=compact-header-1" defer></script>
 </head>
-<body>
+<body data-password-change-required="{{ 'true' if password_change_required else 'false' }}">
   <header>
     <div class="brand-group">
       <img class="app-logo" src="/static/pathscope-logo.svg?v=1" alt="PathScope" />
@@ -76,6 +76,27 @@
   </aside>
   <div id="helpBackdrop" class="help-backdrop hidden"></div>
 
+  {% if admin_auth_enabled %}
+  <section class="target-admin password-admin">
+    <h2>{% if password_change_required %}Change the default admin password{% else %}Admin password{% endif %}</h2>
+    {% if password_change_required %}
+    <p class="password-warning">The default password is active. Set a new password before using the rest of the Admin panel.</p>
+    {% else %}
+    <p>Use a new password with at least 12 characters. You will need to sign in again after it changes.</p>
+      {% if env_password_managed %}
+      <p class="password-warning">The password is managed by PATHSCOPE_ADMIN_PASSWORD_SHA256 and cannot be changed here.</p>
+      {% endif %}
+    {% endif %}
+    <form id="passwordForm" class="admin-grid" autocomplete="off">
+      <input id="newAdminPassword" type="password" minlength="12" maxlength="128" placeholder="New password (12+ characters)" autocomplete="new-password" required {% if env_password_managed %}disabled{% endif %} />
+      <input id="confirmAdminPassword" type="password" minlength="12" maxlength="128" placeholder="Confirm new password" autocomplete="new-password" required {% if env_password_managed %}disabled{% endif %} />
+      <button class="success-action" type="submit" {% if env_password_managed %}disabled{% endif %}>Update Admin Password</button>
+    </form>
+    <div id="passwordMessage" class="form-message" role="status"></div>
+  </section>
+  {% endif %}
+
+  {% if not password_change_required %}
   <section class="target-admin">
     <h2>Target configuration</h2>
     <form id="targetForm" class="admin-grid">
@@ -185,7 +206,8 @@
     </div>
     <div id="maintenanceMessage" class="form-message"></div>
   </section>
+  {% endif %}
 
-  <script src="/static/admin.js?v=html-escaping-2"></script>
+  <script src="/static/admin.js?v=admin-password-1"></script>
 </body>
 </html>

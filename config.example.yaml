@@ -55,3 +55,8 @@ admin_auth:
   enabled: true
   username: admin
   password_sha256: null
+  # First startup creates a password hash for the bootstrap password "password".
+  # The Admin panel requires changing it before any other administrative actions.
+
+# Read-only API routes remain public for integrations unless explicitly protected.
+read_api_auth_required: false

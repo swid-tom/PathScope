@@ -16,7 +16,7 @@ Every 60s by default, each target runs:
 6. Optional **UDP STUN Binding Request** check when a target/port is confirmed to answer STUN.
 7. **Path-change detection** by comparing responsive-hop signatures between successful runs.
 8. **Baseline/anomaly context** against a configurable lookback window.
-9. **Alert event logging** for latency, jitter, loss, and path changes, with optional webhook delivery.
+9. **Alert event logging** for latency, jitter, loss, path changes, and deduplicated probe failure/recovery transitions, with optional webhook delivery.
 
 Results are stored in SQLite (`data/monitor.db`) and shown in a FastAPI + Chart.js UI with:
 
@@ -78,9 +78,13 @@ Rootless Podman can run the web app, but MTR path discovery may collapse to only
 The Compose file mounts `config.yaml` read/write so Admin changes are saved on the host.
 Before starting, copy `config.example.yaml` to `config.yaml` if you have not already done
 so. `config.yaml` is local and excluded from Git; only the placeholder `config.example.yaml`
-is intended to be published. Admin HTTP Basic authentication is enabled by default. Set
-`admin_auth.password_sha256` in your local config before opening `/admin`; with no password
-hash configured, admin requests are rejected.
+is intended to be published. Admin HTTP Basic authentication is enabled by default. On
+first startup, if no admin password hash is configured, the app installs the SHA-256 hash
+of the bootstrap password `password`. Sign in as `admin` with password `password`; the
+Admin page will require a new password of at least 12 characters before other admin
+actions are enabled. The plaintext bootstrap password is not written to the config file.
+Do not expose the app to an untrusted network before changing it; the default is public
+and shared. The Admin panel also lets you update the password later.
 
 ## Configuration
 
@@ -145,6 +149,7 @@ Per-target overrides can be set from `/admin` or directly in YAML:
 
 - `GET /api/targets` — configured targets
 - `POST /api/targets` / `PUT /api/targets/{host}` / `DELETE /api/targets/{host}` — target configuration
+- `POST /api/admin/password` — set a new admin password (requires current HTTP Basic authentication; new password must be at least 12 characters)
 - `GET /api/status?target=` — compact RAG/quality status for one target, suitable for external monitoring integrations
 - `GET /api/latest` — current status per target (for status cards / alerting integration)
 - `GET /api/alerts?limit=50` — logged alert events
@@ -165,10 +170,22 @@ Custom windows use ISO datetimes:
 /api/summary?target=target.example.com&window=custom&start=2026-09-24T12:00:00Z&end=2026-09-24T14:00:00Z
 ```
 
+Invalid windows and malformed or reversed custom ranges return HTTP 400. Chart summaries
+are evenly sampled to at most 2,000 points for responsiveness; CSV exports retain every
+run in the selected range. In `/api/status`, `service_reachable` is `null` when no
+service-port or endpoint probe is configured; an unconfigured service is not treated as
+unreachable.
+
 ## Notes / things to double-check for your environment
 
 - **Admin authentication**: `/admin` and write/maintenance APIs are protected with local
-  HTTP Basic auth by default. Generate a SHA-256 password hash:
+  HTTP Basic auth by default. On a fresh config with no password hash, the bootstrap
+  password is `password` and the Admin panel forces you to replace it before other admin
+  actions are available. The changed password is stored as a SHA-256 hash in `config.yaml`.
+  Keep the app on localhost or a trusted private network until you change the bootstrap
+  password. In Docker, the config file is bind-mounted, so config updates are written
+  in-place when atomic replacement is not supported by the mount. To set a hash manually
+  instead, generate a SHA-256 password hash:
 
   ```powershell
   $password = "change-me"
@@ -188,9 +205,14 @@ Custom windows use ISO datetimes:
 
   You can also override with environment variables: `PATHSCOPE_ADMIN_AUTH_ENABLED`,
   `PATHSCOPE_ADMIN_USERNAME`, and `PATHSCOPE_ADMIN_PASSWORD_SHA256`.
-  The bundled config enables authentication but intentionally has no password hash;
-  set one before using the Admin page. Dashboard, alerts, and read-only APIs remain
-  unauthenticated for monitoring integrations.
+  When `PATHSCOPE_ADMIN_PASSWORD_SHA256` is set, password changes must be made by updating
+  that environment variable and restarting the app; the Admin password form is disabled.
+  Dashboard, alerts, and read-only APIs remain
+  unauthenticated by default for monitoring integrations. To protect read-only APIs with
+  the same Basic credentials, set `read_api_auth_required: true` in `config.yaml` or set
+  `PATHSCOPE_READ_API_AUTH_REQUIRED=true`. This requires admin authentication to be enabled
+  and a password hash to be configured; otherwise protected API requests return HTTP 503.
+  When enabled, the dashboard's API requests also require those credentials.
 - **LDAP/SSO**: for Active Directory, Entra ID, Okta, Duo, or other SSO, put the app
   behind a reverse proxy such as NGINX, Caddy, Traefik, oauth2-proxy, Authelia, or
   an enterprise access gateway. Keep the app bound internally and let the proxy handle
@@ -254,3 +276,9 @@ See [docs/storage-and-timeseries-roadmap.md](docs/storage-and-timeseries-roadmap
 External monitoring systems can use `GET /api/status?target=<host>` for a compact per-target
 health summary or `GET /api/latest` for all configured targets. The full dashboard remains
 available for charts, alerts, and hop-level troubleshooting.
+
+Run the focused regression suite with:
+
+```bash
+python -m unittest discover -s tests -v
+```
