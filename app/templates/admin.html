@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>PathScope Admin</title>
+  <link rel="stylesheet" href="/static/style.css?v=compact-header-2" />
+  <script src="/static/theme.js?v=compact-header-1" defer></script>
+</head>
+<body>
+  <header>
+    <div class="brand-group">
+      <img class="app-logo" src="/static/pathscope-logo.svg?v=1" alt="PathScope" />
+      <div class="brand-block">
+        <div class="app-subtitle">Administration</div>
+      </div>
+    </div>
+    <div class="controls">
+      <details class="header-menu">
+        <summary aria-label="Open options menu">Options <span aria-hidden="true">⌄</span></summary>
+        <div class="header-menu-panel">
+          <section class="menu-section">
+            <h2>Appearance</h2>
+            <label class="theme-control" title="Full mode shifts from deep navy at night to a lighter blue-toned palette in daytime, using your local time.">
+              Theme
+              <select id="themeSelect" aria-label="Color theme">
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+                <option value="full">Full</option>
+              </select>
+            </label>
+          </section>
+          <nav class="menu-actions" aria-label="Administration navigation">
+            <a class="button-link" href="/">Dashboard</a>
+            <button id="helpBtn" type="button">Quick help</button>
+          </nav>
+        </div>
+      </details>
+    </div>
+  </header>
+
+  <aside id="helpDrawer" class="help-drawer" aria-hidden="true">
+    <div class="help-drawer-header">
+      <div>
+        <h2>Admin Help</h2>
+        <p>Target and probe configuration</p>
+      </div>
+      <button id="closeHelpBtn" type="button" aria-label="Close help">Close</button>
+    </div>
+    <div class="help-content">
+      <details open>
+        <summary>When to use this app</summary>
+        <p>Use this tool for targets where standard monitoring is not enough: no ICMP response, filtered traceroute, or a need for RTT/loss/jitter/path details.</p>
+      </details>
+      <details>
+        <summary>MTR protocol</summary>
+        <p><b>TCP</b> follows service-port behavior and is useful for cloud/SaaS edges. <b>ICMP</b> is classic ping-style MTR and uses no port. <b>UDP</b> can help test UDP paths but is commonly filtered.</p>
+      </details>
+      <details>
+        <summary>Endpoint probe</summary>
+        <p>Endpoint probe measures only the final resolved destination. It feeds endpoint RTT, loss, jitter, quality score, and alerts.</p>
+        <p>If ICMP is selected, no endpoint port is used. If TCP is selected, blank port means target default/service port.</p>
+      </details>
+      <details>
+        <summary>TCP/TLS service ports</summary>
+        <p>Use this for service reachability checks such as 443 or 443,3478. These are separate from MTR probe ports.</p>
+      </details>
+      <details>
+        <summary>DSCP/TOS</summary>
+        <p>Per-target DSCP marks synthetic probes where supported. The app maps <code>TOS = DSCP &lt;&lt; 2</code>.</p>
+      </details>
+      <details>
+        <summary>Thresholds</summary>
+        <p>Per-target thresholds override global defaults for latency, jitter, loss, and path-change alerts.</p>
+      </details>
+    </div>
+  </aside>
+  <div id="helpBackdrop" class="help-backdrop hidden"></div>
+
+  <section class="target-admin">
+    <h2>Target configuration</h2>
+    <form id="targetForm" class="admin-grid">
+      <input id="targetHost" name="host" type="text" placeholder="host.example.com" autocomplete="off" required />
+      <input id="targetLabel" name="label" type="text" placeholder="Display label" autocomplete="off" />
+      <select id="mtrProtocol" aria-label="MTR protocol">
+        <option value="tcp">MTR TCP</option>
+        <option value="udp">MTR UDP</option>
+        <option value="icmp">MTR ICMP/ping</option>
+      </select>
+      <input id="mtrPort" type="number" min="1" max="65535" placeholder="MTR probe port" title="Used only for MTR TCP/UDP. ICMP MTR does not use a port." />
+      <input id="thresholdLatency" type="number" min="0" step="1" placeholder="Latency ms" />
+      <input id="thresholdJitter" type="number" min="0" step="1" placeholder="Jitter ms" />
+      <input id="thresholdLoss" type="number" min="0" max="100" step="0.1" placeholder="Loss %" />
+      <label class="inline-check"><input id="thresholdPathChange" type="checkbox" /> Alert on path change</label>
+      <label class="inline-check"><input id="endpointEnabled" type="checkbox" /> Endpoint probe</label>
+      <select id="endpointProtocol" aria-label="Endpoint probe protocol">
+        <option value="tcp">TCP</option>
+        <option value="icmp">ICMP</option>
+      </select>
+      <input id="endpointCount" type="number" min="1" max="50" placeholder="Probe count" />
+      <input id="endpointPort" type="number" min="1" max="65535" placeholder="Probe port" />
+      <input id="targetPorts" name="ports" type="text" placeholder="TCP/TLS service ports (optional)" aria-label="TCP/TLS service ports" title="Optional comma-separated TCP/TLS service ports to check, such as 443 or 443,3478. Leave blank for no TCP/TLS service checks." />
+      <select id="dscpSelect" aria-label="DSCP marking">
+        <option value="">DSCP default</option>
+        <option value="0">CS0 / Best Effort (0)</option>
+        <option value="8">CS1 / Scavenger (8)</option>
+        <option value="10">AF11 (10)</option>
+        <option value="12">AF12 (12)</option>
+        <option value="14">AF13 (14)</option>
+        <option value="16">CS2 (16)</option>
+        <option value="18">AF21 (18)</option>
+        <option value="20">AF22 (20)</option>
+        <option value="22">AF23 (22)</option>
+        <option value="24">CS3 (24)</option>
+        <option value="26">AF31 (26)</option>
+        <option value="28">AF32 (28)</option>
+        <option value="30">AF33 (30)</option>
+        <option value="32">CS4 / Video common (32)</option>
+        <option value="34">AF41 / Video common (34)</option>
+        <option value="36">AF42 (36)</option>
+        <option value="38">AF43 (38)</option>
+        <option value="40">CS5 / Signaling common (40)</option>
+        <option value="46">EF / Voice media common (46)</option>
+        <option value="48">CS6 / Network control (48)</option>
+        <option value="56">CS7 / Network control (56)</option>
+      </select>
+        <button id="saveTargetBtn" class="success-action" type="submit">Add Target</button>
+        <button id="clearTargetBtn" class="warn-action" type="button">Clear</button>
+    </form>
+    <div id="targetMessage" class="form-message"></div>
+    <details class="reference-details">
+      <summary>DSCP/TOS reference</summary>
+      <div class="reference-grid">
+        <span><b>CS0/0</b> Best effort</span>
+        <span><b>CS1/8</b> Scavenger/background</span>
+        <span><b>AF11-13</b> Low-priority assured forwarding</span>
+        <span><b>AF21-23</b> Medium-low assured forwarding</span>
+        <span><b>AF31-33</b> Business/transactional data</span>
+        <span><b>AF41-43</b> Video/interactive media common</span>
+        <span><b>CS5/40</b> Signaling common</span>
+        <span><b>EF/46</b> Voice/RTP media common</span>
+        <span><b>CS6/48</b> Network control</span>
+        <span><b>CS7/56</b> Network control/reserved</span>
+      </div>
+      <p>Linux socket/ping/mtr TOS byte is DSCP shifted left two bits: <code>TOS = DSCP &lt;&lt; 2</code>.</p>
+    </details>
+  </section>
+
+  <section class="target-admin">
+    <h2>Monitored targets</h2>
+    <div id="targetRows" class="target-rows"></div>
+  </section>
+
+  <section class="target-admin">
+    <details class="api-reference-details">
+      <summary>API reference</summary>
+      <div class="api-reference">
+        <div><code>GET /api/latest</code><span>Current status for all targets; drives dashboard cards.</span></div>
+        <div><code>GET /api/status?target=&lt;host&gt;</code><span>Compact single-target status for external monitoring integrations.</span></div>
+        <div><code>GET /api/summary?target=&lt;host&gt;&amp;window=24h</code><span>Chart time series for latency, jitter, loss, endpoint RTT/loss.</span></div>
+        <div><code>GET /api/runs?target=&lt;host&gt;&amp;window=1h&amp;limit=10</code><span>Recent raw probe runs for a target.</span></div>
+        <div><code>GET /api/runs/{id}/hops</code><span>Hop-by-hop MTR data for a run.</span></div>
+        <div><code>GET /api/export.csv?target=&lt;host&gt;&amp;window=24h</code><span>CSV export matching the selected target/window.</span></div>
+        <div><code>GET /api/alerts?limit=100</code><span>Logged alert events with expandable details.</span></div>
+        <div><code>DELETE /api/alerts</code><span>Clear alert log only; probe history remains.</span></div>
+        <div><code>GET /api/targets</code><span>Configured targets and effective per-target settings.</span></div>
+        <div><code>POST/PUT/DELETE /api/targets</code><span>Admin target management endpoints.</span></div>
+        <div><code>GET /api/maintenance/stats</code><span>Database row counts and size.</span></div>
+        <div><code>GET/PUT /api/settings/retention</code><span>View or update automatic prune retention days.</span></div>
+        <div><code>POST /api/maintenance/prune</code><span>Delete old probe history by retention days.</span></div>
+        <div><code>POST /api/maintenance/vacuum</code><span>Compact SQLite database and WAL.</span></div>
+      </div>
+    </details>
+  </section>
+
+  <section class="target-admin">
+    <h2>Database maintenance</h2>
+    <div class="maintenance-controls">
+      <input id="autoRetentionDays" type="number" min="1" max="3650" value="30" aria-label="Auto purge retention days" />
+      <button id="saveRetentionBtn" class="success-action" type="button">Save Auto Purge Days</button>
+    </div>
+    <div class="maintenance-controls">
+      <input id="retentionDays" type="number" min="1" max="3650" value="30" aria-label="Retention days" />
+      <button id="pruneBtn" type="button">Prune Old History</button>
+      <button id="vacuumBtn" type="button">Compact Database</button>
+    </div>
+    <div id="maintenanceMessage" class="form-message"></div>
+  </section>
+
+  <script src="/static/admin.js?v=html-escaping-2"></script>
+</body>
+</html>

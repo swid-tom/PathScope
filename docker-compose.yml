@@ -1,0 +1,13 @@
+services:
+  pathscope:
+    build: .
+    container_name: pathscope-monitor
+    cap_add:
+      - NET_RAW      # required by mtr for ICMP/UDP probing
+      - NET_ADMIN
+    volumes:
+      - ./data:/app/data
+      - ./config.yaml:/app/config.yaml
+    ports:
+      - "8000:8000"
+    restart: unless-stopped

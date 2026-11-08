@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 230 68" role="img" aria-labelledby="logo-title">
+  <title id="logo-title">PathScope</title>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 34C14 17 32 17 42 34 32 51 14 51 4 34Z" fill="#77aaff" fill-opacity=".12" stroke="#a9d2ff" stroke-width="3"/>
+    <path d="M26 34C36 17 54 17 64 34 54 51 36 51 26 34Z" fill="#77aaff" fill-opacity=".12" stroke="#77aaff" stroke-width="3"/>
+    <circle cx="23" cy="34" r="6.5" stroke="#a9d2ff" stroke-width="2.5"/>
+    <circle cx="45" cy="34" r="6.5" stroke="#77aaff" stroke-width="2.5"/>
+    <path d="M27.5 34h13" stroke="#d9ebff" stroke-width="2"/>
+  </g>
+  <circle cx="23" cy="34" r="2.5" fill="#d9ebff"/>
+  <circle cx="45" cy="34" r="2.5" fill="#d9ebff"/>
+  <text x="78" y="43" fill="#fff" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" letter-spacing="1">PATHSCOPE</text>
+</svg>

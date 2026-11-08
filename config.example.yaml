@@ -1,0 +1,57 @@
+targets:
+  - host: example.com
+    label: Example target
+    tcp_ports: []
+    mtr_protocol: tcp
+    mtr_port: 443
+    alert_latency_ms: 250.0
+    alert_jitter_ms: 50.0
+    alert_loss_pct: 2.0
+    alert_path_change: true
+    endpoint_probe_enabled: true
+    endpoint_probe_protocol: tcp
+    endpoint_probe_count: 5
+
+mtr:
+  count: 5
+  protocol: tcp
+  port: 443
+  interval_seconds: 60
+
+retention_days: 30
+port_timeout_seconds: 3
+
+endpoint_probe:
+  enabled: true
+  protocol: tcp
+  count: 5
+  port: null
+
+tls:
+  enabled: true
+
+stun:
+  enabled: false
+  port: 3478
+
+geoip:
+  enabled: true
+  cache_ttl_seconds: 86400
+
+dns_sinkhole_ranges: []
+
+baseline:
+  days: 7
+
+alerts:
+  enabled: true
+  webhook_url: null
+  latency_ms: 250
+  jitter_ms: 50
+  loss_pct: 2
+  path_change: true
+
+admin_auth:
+  enabled: true
+  username: admin
+  password_sha256: null

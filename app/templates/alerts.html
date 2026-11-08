@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>PathScope Alerts</title>
+  <link rel="stylesheet" href="/static/style.css?v=compact-header-2" />
+  <script src="/static/theme.js?v=compact-header-1" defer></script>
+</head>
+<body>
+  <header>
+    <div class="brand-group">
+      <img class="app-logo" src="/static/pathscope-logo.svg?v=1" alt="PathScope" />
+      <div class="brand-block">
+        <div class="app-subtitle">Alert History</div>
+      </div>
+    </div>
+    <div class="controls">
+      <details class="header-menu">
+        <summary aria-label="Open options menu">Options <span aria-hidden="true">⌄</span></summary>
+        <div class="header-menu-panel">
+          <section class="menu-section">
+            <h2>Alerts</h2>
+            <label>Limit:
+              <select id="alertLimit">
+                <option value="50">50</option>
+                <option value="100" selected>100</option>
+                <option value="250">250</option>
+                <option value="500">500</option>
+              </select>
+            </label>
+          </section>
+          <section class="menu-section">
+            <h2>Appearance</h2>
+            <label class="theme-control" title="Full mode shifts from deep navy at night to a lighter blue-toned palette in daytime, using your local time.">
+              Theme
+              <select id="themeSelect" aria-label="Color theme">
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+                <option value="full">Full</option>
+              </select>
+            </label>
+          </section>
+          <nav class="menu-actions" aria-label="Alert actions">
+            <a class="button-link" href="/">Dashboard</a>
+            <a class="button-link" href="/admin">Admin</a>
+            <button id="helpBtn" type="button">Quick help</button>
+            <button id="clearAlertsBtn" class="danger" type="button">Clear Alerts</button>
+          </nav>
+        </div>
+      </details>
+    </div>
+  </header>
+
+  <aside id="helpDrawer" class="help-drawer" aria-hidden="true">
+    <div class="help-drawer-header">
+      <div>
+        <h2>Alert Help</h2>
+        <p>Reading and clearing alert history</p>
+      </div>
+      <button id="closeHelpBtn" type="button" aria-label="Close help">Close</button>
+    </div>
+    <div class="help-content">
+      <details open>
+        <summary>Alert types</summary>
+        <p>Alerts currently cover latency, jitter, loss, and path changes. Metrics prefer endpoint probe results and fall back to MTR effective-hop data.</p>
+      </details>
+      <details>
+        <summary>Details sections</summary>
+        <p>Expand an alert for measured values, thresholds, source used, and path-change before/after hops when available.</p>
+      </details>
+      <details>
+        <summary>Path changes</summary>
+        <p>Path-change alerts compare responsive hops from the current successful run to the prior successful run.</p>
+      </details>
+      <details>
+        <summary>Main dashboard vs history</summary>
+        <p>The dashboard shows only recent alerts. This page is the logged history until you clear alerts or prune data.</p>
+      </details>
+      <details>
+        <summary>Clearing alerts</summary>
+        <p>Clear Alerts removes logged alert events only. It does not delete probe runs, charts, paths, or target history.</p>
+      </details>
+    </div>
+  </aside>
+  <div id="helpBackdrop" class="help-backdrop hidden"></div>
+
+  <section class="alerts-section">
+    <h2>Logged alert history</h2>
+    <div id="alertsPageList" class="alerts-list alerts-page-list"></div>
+  </section>
+
+  <script src="/static/alerts.js?v=html-escaping-2"></script>
+</body>
+</html>
