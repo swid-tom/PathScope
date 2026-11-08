@@ -1,7 +1,16 @@
+<p align="center">
+  <img src="app/static/pathscope-logo.svg" alt="PathScope" width="300" />
+</p>
+
 # PathScope — Network Path & Edge Monitor
 
-PathScope is a self-hosted network latency and path monitor for service endpoints. Add any
-hostname through the Admin page to monitor its DNS, network path, and service reachability.
+PathScope helps you keep an eye on network latency, routes, DNS, and service availability.
+Add a hostname in Admin to start monitoring it.
+
+> **First time opening Admin?** Sign in with username **`admin`** and password **`password`**.
+> PathScope will ask you to choose a new password before you can use the rest of Admin.
+> Change it before making the app available to anyone you don’t trust: `password` is a
+> shared default, not a secret.
 
 Targets are loaded from `config.yaml` and can be added or edited from the Admin page.
 
@@ -77,14 +86,10 @@ Rootless Podman can run the web app, but MTR path discovery may collapse to only
 
 The Compose file mounts `config.yaml` read/write so Admin changes are saved on the host.
 Before starting, copy `config.example.yaml` to `config.yaml` if you have not already done
-so. `config.yaml` is local and excluded from Git; only the placeholder `config.example.yaml`
-is intended to be published. Admin HTTP Basic authentication is enabled by default. On
-first startup, if no admin password hash is configured, the app installs the SHA-256 hash
-of the bootstrap password `password`. Sign in as `admin` with password `password`; the
-Admin page will require a new password of at least 12 characters before other admin
-actions are enabled. The plaintext bootstrap password is not written to the config file.
-Do not expose the app to an untrusted network before changing it; the default is public
-and shared. The Admin panel also lets you update the password later.
+so. `config.yaml` is local and excluded from Git. Admin sign-in uses HTTP Basic
+authentication. On first startup, use **`admin` / `password`**; Admin will guide you
+through setting a new password (at least 12 characters). You can change it later from
+the same page. Until you do, keep PathScope on your own computer or trusted network.
 
 ## Configuration
 
@@ -178,41 +183,15 @@ unreachable.
 
 ## Notes / things to double-check for your environment
 
-- **Admin authentication**: `/admin` and write/maintenance APIs are protected with local
-  HTTP Basic auth by default. On a fresh config with no password hash, the bootstrap
-  password is `password` and the Admin panel forces you to replace it before other admin
-  actions are available. The changed password is stored as a SHA-256 hash in `config.yaml`.
-  Keep the app on localhost or a trusted private network until you change the bootstrap
-  password. In Docker, the config file is bind-mounted, so config updates are written
-  in-place when atomic replacement is not supported by the mount. To set a hash manually
-  instead, generate a SHA-256 password hash:
-
-  ```powershell
-  $password = "change-me"
-  $bytes = [System.Text.Encoding]::UTF8.GetBytes($password)
-  $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
-  [Convert]::ToHexString($hash).ToLower()
-  ```
-
-  Then set in `config.yaml`:
-
-  ```yaml
-  admin_auth:
-    enabled: true
-    username: admin
-    password_sha256: "<hash>"
-  ```
-
-  You can also override with environment variables: `PATHSCOPE_ADMIN_AUTH_ENABLED`,
-  `PATHSCOPE_ADMIN_USERNAME`, and `PATHSCOPE_ADMIN_PASSWORD_SHA256`.
-  When `PATHSCOPE_ADMIN_PASSWORD_SHA256` is set, password changes must be made by updating
-  that environment variable and restarting the app; the Admin password form is disabled.
-  Dashboard, alerts, and read-only APIs remain
-  unauthenticated by default for monitoring integrations. To protect read-only APIs with
-  the same Basic credentials, set `read_api_auth_required: true` in `config.yaml` or set
-  `PATHSCOPE_READ_API_AUTH_REQUIRED=true`. This requires admin authentication to be enabled
-  and a password hash to be configured; otherwise protected API requests return HTTP 503.
-  When enabled, the dashboard's API requests also require those credentials.
+- **Admin sign-in**: Admin is protected by a username and password. The first-time
+  password is `password`; change it when prompted. Your new password is saved as a hash
+  in your local `config.yaml`. If you manage the password with the
+  `PATHSCOPE_ADMIN_PASSWORD_SHA256` environment variable, update that variable and restart
+  PathScope instead; the password form will be disabled.
+- **Read-only API access**: Dashboard and monitoring APIs are public by default so
+  integrations can use them. To require the Admin credentials for these APIs, set
+  `read_api_auth_required: true` in `config.yaml` or `PATHSCOPE_READ_API_AUTH_REQUIRED=true`.
+  This also means the dashboard needs those credentials to load its data.
 - **LDAP/SSO**: for Active Directory, Entra ID, Okta, Duo, or other SSO, put the app
   behind a reverse proxy such as NGINX, Caddy, Traefik, oauth2-proxy, Authelia, or
   an enterprise access gateway. Keep the app bound internally and let the proxy handle
