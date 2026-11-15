@@ -73,16 +73,36 @@ sudo .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 Then open [http://localhost:8000](http://localhost:8000)
 
 `requirements.txt` is a hash-pinned lock file generated from `requirements.in`. When
-changing direct dependencies, update `requirements.in` and regenerate the lock with:
+changing direct dependencies, update `requirements.in`, install `pip-tools`, and regenerate
+the lock with:
 
 ```bash
+python -m pip install pip-tools
 pip-compile --generate-hashes --allow-unsafe --resolver=backtracking \
   --output-file=requirements.txt requirements.in
 ```
 
 The Docker base image is pinned by digest in `Dockerfile`; update that digest deliberately
-when refreshing the Python image. Publishing a GitHub Release generates a CycloneDX SBOM
-for the built container image and attaches it to the release.
+when refreshing the Python image.
+
+### SBOM and AI-assisted development
+
+The [release SBOM workflow](.github/workflows/release-sbom.yml) runs when a GitHub Release
+is **published** (pushing a tag alone does not trigger it). It checks out the release tag,
+builds the Docker image, and uses Syft to generate a CycloneDX JSON inventory of components
+detected in that image, including Python and operating-system packages. The SBOM is
+available as a workflow artifact and as `pathscope-image.cdx.json` in the release assets.
+The image is built on the runner for inventory; this workflow does not publish the image
+to a container registry.
+
+An SBOM is a component inventory, not a vulnerability scan or a compliance certification.
+The Python dependencies are hash-pinned in `requirements.txt` and the Python base image is
+pinned by digest. OS packages installed with `apt-get` are inventoried in the SBOM, but
+their versions are not currently locked between builds.
+
+When AI tools are used, contributors should review and test generated changes, avoid
+including secrets or private operational data in prompts, and assess generated dependencies
+before adding them. See the [AI-assisted development guidance](.github/copilot-instructions.md).
 
 ## Docker / Podman notes
 `mtr` needs raw-socket privileges, so this is packaged for Linux/Docker (works fine on
