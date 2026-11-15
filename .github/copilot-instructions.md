@@ -151,3 +151,11 @@ After DB schema changes:
 - Preserve existing API behavior unless intentionally changing it.
 - Use clear field names: `endpoint_avg_ms`, `dest_jitter_ms`, `path_changed`, etc.
 - Keep UI text direct and operational.
+
+## AI-Assisted Development
+
+- Treat AI-generated code, tests, and dependency suggestions as untrusted until reviewed and verified.
+- Run the relevant tests and checks; do not rely on an AI-generated explanation as evidence that a change is safe.
+- Do not include credentials, private configuration, internal target names or addresses, or customer/operational data in AI prompts.
+- Review generated dependencies for necessity, maintenance status, license compatibility, and known vulnerabilities before adding them.
+- A human contributor remains responsible for the change and its security impact.

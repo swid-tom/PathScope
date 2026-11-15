@@ -1,0 +1,33 @@
+name: Release SBOM
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+jobs:
+  sbom:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+
+      - name: Build release image
+        run: docker build --pull --tag pathscope:${{ github.sha }} .
+
+      - name: Generate and attach container SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c
+        with:
+          image: pathscope:${{ github.sha }}
+          format: cyclonedx-json
+          output-file: pathscope-image.cdx.json
+          artifact-name: pathscope-image.cdx.json
+          upload-artifact: true
+          upload-release-assets: true

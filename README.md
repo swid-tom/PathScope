@@ -66,11 +66,23 @@ sudo apt-get update
 sudo apt-get install -y mtr-tiny python3-full python3-venv python3-pip
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt
+python -m pip install --require-hashes -r requirements.txt
 sudo .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 Then open [http://localhost:8000](http://localhost:8000)
+
+`requirements.txt` is a hash-pinned lock file generated from `requirements.in`. When
+changing direct dependencies, update `requirements.in` and regenerate the lock with:
+
+```bash
+pip-compile --generate-hashes --allow-unsafe --resolver=backtracking \
+  --output-file=requirements.txt requirements.in
+```
+
+The Docker base image is pinned by digest in `Dockerfile`; update that digest deliberately
+when refreshing the Python image. Publishing a GitHub Release generates a CycloneDX SBOM
+for the built container image and attaches it to the release.
 
 ## Docker / Podman notes
 `mtr` needs raw-socket privileges, so this is packaged for Linux/Docker (works fine on
