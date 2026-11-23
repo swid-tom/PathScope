@@ -82,6 +82,16 @@ function fmt(n, digits = 1) {
   return n === null || n === undefined ? "-" : Number(n).toFixed(digits);
 }
 
+function metricStateClass(value, threshold) {
+  if (value === null || value === undefined || threshold === null || threshold === undefined) return "";
+  const measured = Number(value);
+  const limit = Number(threshold);
+  if (!Number.isFinite(measured) || !Number.isFinite(limit)) return "";
+  if (measured >= limit) return "metric-bad";
+  if (measured >= limit * 0.75) return "metric-warn";
+  return "metric-good";
+}
+
 function getSavedCardOrder() {
   try {
     return JSON.parse(localStorage.getItem(cardOrderKey) || "[]");
@@ -275,13 +285,35 @@ async function loadStatusCards() {
         await refreshAll();
       }
     });
+    const qualityScore = Number.isFinite(Number(t.quality?.score))
+      ? Math.max(0, Math.min(100, Number(t.quality.score)))
+      : 0;
+    const qualityGrade = String(t.quality?.grade || "");
+    const thresholds = t.effective_alerts || {};
     div.innerHTML = `
       <div class="card-heading">
         <div>
           <h3>${escapeHTML(t.label || t.target)}</h3>
           <div class="target-hostname">${escapeHTML(t.target)}</div>
         </div>
-        <span class="quality-badge ${escapeHTML(String(t.quality?.grade || "").toLowerCase())}">${escapeHTML(t.quality?.score ?? "-")} ${escapeHTML(t.quality?.grade || "")}</span>
+        <span
+          class="quality-badge ${escapeHTML(qualityGrade.toLowerCase())}"
+          style="--quality-level:${qualityScore}%"
+          role="meter"
+          aria-label="Health score ${qualityScore} out of 100"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="${qualityScore}"
+          title="${escapeHTML(`${qualityScore}/100 ${qualityGrade}`.trim())}"
+        >
+          <span class="quality-meter-label">
+            <strong>${qualityScore}</strong>
+            <span>${escapeHTML(qualityGrade)}</span>
+          </span>
+          <span class="quality-track" aria-hidden="true">
+            <span class="quality-fill"></span>
+          </span>
+        </span>
       </div>
       <div class="row"><span>Resolved IP</span><b>${escapeHTML(t.resolved_ip || "-")}</b></div>
       ${t.dns_sinkhole_match ? `<div class="row warn-text"><span>DNS security range</span><b>${escapeHTML(t.dns_sinkhole_range)}</b></div>` : ""}
@@ -289,13 +321,18 @@ async function loadStatusCards() {
       <div class="row"><span>Quality reason</span><b>${escapeHTML((t.quality?.reasons || ["-"])[0])}</b></div>
       <div class="row"><span>DNS time</span><b>${fmt(t.dns_ms)} ms</b></div>
       <div class="row"><span>Hop count</span><b>${t.hop_count ?? "-"}</b></div>
-      <div class="row"><span>Dest avg latency</span><b>${fmt(t.dest_avg_ms)} ms</b></div>
-      <div class="row"><span>Probe jitter</span><b>${fmt(t.dest_jitter_ms)} ms</b></div>
-      <div class="row"><span>Dest loss</span><b>${fmt(t.dest_loss_pct)}%</b></div>
-      <div class="row"><span>Endpoint ${escapeHTML(t.endpoint_probe_protocol || "probe")}</span><b>${fmt(t.endpoint_avg_ms)} ms</b></div>
-      <div class="row"><span>Endpoint jitter/loss</span><b>${fmt(t.endpoint_jitter_ms)} ms / ${fmt(t.endpoint_loss_pct)}%</b></div>
+      <div class="row"><span>Dest avg latency</span><b class="${metricStateClass(t.dest_avg_ms, thresholds.latency_ms)}">${fmt(t.dest_avg_ms)} ms</b></div>
+      <div class="row"><span>Probe jitter</span><b class="${metricStateClass(t.dest_jitter_ms, thresholds.jitter_ms)}">${fmt(t.dest_jitter_ms)} ms</b></div>
+      <div class="row"><span>Dest loss</span><b class="${metricStateClass(t.dest_loss_pct, thresholds.loss_pct)}">${fmt(t.dest_loss_pct)}%</b></div>
+      <div class="row"><span>Endpoint ${escapeHTML(t.endpoint_probe_protocol || "probe")}</span><b class="${metricStateClass(t.endpoint_avg_ms, thresholds.latency_ms)}">${fmt(t.endpoint_avg_ms)} ms</b></div>
+      <div class="row"><span>Endpoint jitter/loss</span><b class="metric-combined">
+        <span class="metric-value ${metricStateClass(t.endpoint_jitter_ms, thresholds.jitter_ms)}">${fmt(t.endpoint_jitter_ms)} ms</span>
+        <span class="metric-separator">/</span>
+        <span class="metric-value ${metricStateClass(t.endpoint_loss_pct, thresholds.loss_pct)}">${fmt(t.endpoint_loss_pct)}%</span>
+      </b></div>
       <div class="row"><span>Latency vs baseline</span><b>${fmt(t.latency_deviation_pct)}%</b></div>
-      <div class="row"><span>Path changed</span><b>${t.path_changed ? "YES" : "no"}</b></div>
+      <div class="row"><span>Path changed</span><b class="${t.path_changed ? "metric-warn" : "metric-good"}">${t.path_changed ? "YES" : "no"}</b></div>
+      <div class="row"><span>Last path change (ET)</span><b>${t.last_path_change ? fmtEastern(t.last_path_change) : "Never"}</b></div>
       <div class="row"><span>Last check (ET)</span><b>${fmtEastern(t.timestamp)}</b></div>
       ${(t.ports || [])
         .map(
@@ -373,7 +410,10 @@ async function loadCharts() {
   const lossPct = points.map((p) => p.loss_pct);
   const endpointAvgMs = points.map((p) => p.endpoint_avg_ms);
   const endpointLossPct = points.map((p) => p.endpoint_loss_pct);
-  const hopCounts = points.map((p) => p.hop_count);
+  const hopCounts = points.map((p) => {
+    const count = Number(p.hop_count);
+    return Number.isInteger(count) && count >= 0 ? count : null;
+  });
   const seriesColors = chartSeriesColors();
 
   if (typeof Chart === "undefined") {
@@ -468,7 +508,15 @@ async function loadCharts() {
         y: {
           grid: { color: themeColor("--chart-grid", "rgba(175, 195, 220, 0.2)") },
           title: { display: true, text: "hops", color: themeColor("--chart-text", "#e8eff7"), font: { size: 12, weight: "700" } },
-          ticks: { color: themeColor("--chart-text", "#e8eff7"), font: { size: 10, weight: "600" } },
+          beginAtZero: true,
+          suggestedMax: 10,
+          ticks: {
+            color: themeColor("--chart-text", "#e8eff7"),
+            font: { size: 10, weight: "600" },
+            stepSize: 1,
+            precision: 0,
+            callback: (value) => Number.isInteger(value) ? value : null,
+          },
         },
       },
     },

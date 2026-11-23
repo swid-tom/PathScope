@@ -41,6 +41,32 @@ def effective_path_hops(session, run_ids: list[int]) -> dict[int, Hop]:
     return effective
 
 
+def integer_hop_count(value: int | float | None) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    try:
+        hop_count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return hop_count if hop_count >= 0 else None
+
+
+def last_path_change(session, target: str) -> dt.datetime | None:
+    run = (
+        session.query(Run)
+        .filter(
+            Run.target == target,
+            Run.success.is_(True),
+            Run.path_changed.is_(True),
+        )
+        .order_by(Run.timestamp.desc())
+        .first()
+    )
+    return run.timestamp if run else None
+
+
 def service_reachability(run: Run, ports: list[PortCheck]) -> bool | None:
     if ports:
         return any(port.success for port in ports)

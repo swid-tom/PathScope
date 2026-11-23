@@ -3,13 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <title>PathScope Alerts</title>
-  <link rel="stylesheet" href="/static/style.css?v=alert-info-1" />
+  <link rel="stylesheet" href="/static/style.css?v=alerts-refresh-1" />
   <script src="/static/theme.js?v=compact-header-1" defer></script>
 </head>
 <body>
   <header>
     <div class="brand-group">
-      <img class="app-logo" src="/static/pathscope-logo.svg?v=1" alt="PathScope" />
+      <a class="logo-link" href="/" aria-label="Return to PathScope dashboard">
+        <img class="app-logo" src="/static/pathscope-logo.svg?v=1" alt="PathScope" />
+      </a>
       <div class="brand-block">
         <div class="app-subtitle">Alert History</div>
       </div>
@@ -51,6 +53,14 @@
     </div>
   </header>
 
+  <div class="page-toolbar" aria-label="Alert page actions">
+    <button id="refreshAlertsBtn" class="icon-button" type="button" title="Refresh alerts" aria-label="Refresh alerts">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M20 11a8 8 0 1 0-2.34 5.66M20 11V5m0 6h-6" />
+      </svg>
+    </button>
+  </div>
+
   <aside id="helpDrawer" class="help-drawer" aria-hidden="true">
     <div class="help-drawer-header">
       <div>
@@ -89,6 +99,6 @@
     <div id="alertsPageList" class="alerts-list alerts-page-list"></div>
   </section>
 
-  <script src="/static/alerts.js?v=html-escaping-2"></script>
+  <script src="/static/alerts.js?v=alerts-refresh-1"></script>
 </body>
 </html>

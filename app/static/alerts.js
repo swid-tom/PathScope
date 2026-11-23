@@ -5,6 +5,7 @@ const helpBtn = document.getElementById("helpBtn");
 const closeHelpBtn = document.getElementById("closeHelpBtn");
 const helpDrawer = document.getElementById("helpDrawer");
 const helpBackdrop = document.getElementById("helpBackdrop");
+const refreshAlertsBtn = document.getElementById("refreshAlertsBtn");
 
 function escapeHTML(value) {
   return String(value ?? "").replace(/[&<>"']/g, (character) => ({
@@ -40,18 +41,28 @@ function fmtEastern(timestamp) {
 function renderDetails(details) {
   if (!details || !Object.keys(details).length) return "";
   if (details.current_path || details.previous_path) {
-    const added = escapeHTML((details.added_hops || []).join(" -> ") || "none");
-    const removed = escapeHTML((details.removed_hops || []).join(" -> ") || "none");
-    const previous = escapeHTML((details.previous_path || []).join(" -> ") || "none");
-    const current = escapeHTML((details.current_path || []).join(" -> ") || "none");
+    const addedHops = Array.isArray(details.added_hops) ? details.added_hops : [];
+    const removedHops = Array.isArray(details.removed_hops) ? details.removed_hops : [];
+    const renderPath = (hops, changedHops, direction) => {
+      if (!hops.length) return `<span class="path-hops-none">none</span>`;
+      const changedSet = new Set(changedHops);
+      return hops
+        .map((hop) => {
+          if (!changedSet.has(hop)) {
+            return `<span class="path-ip-neutral">${escapeHTML(hop)}</span>`;
+          }
+          return `<span class="path-ip path-ip-${direction}">${escapeHTML(hop)}</span>`;
+        })
+        .join('<span class="path-hop-arrow" aria-hidden="true"> &rarr; </span>');
+    };
+    const previous = renderPath(details.previous_path || [], removedHops, "removed");
+    const current = renderPath(details.current_path || [], addedHops, "added");
     return `
       <details class="alert-details">
         <summary>Path change details</summary>
-        <div><strong>Previous run:</strong> ${escapeHTML(details.previous_run_id ?? "-")} ${escapeHTML(details.previous_timestamp || "")}</div>
-        <div><strong>Previous path (${escapeHTML(details.previous_hop_count ?? 0)}):</strong> ${previous}</div>
-        <div><strong>Current path (${escapeHTML(details.current_hop_count ?? 0)}):</strong> ${current}</div>
-        <div><strong>Added hops:</strong> ${added}</div>
-        <div><strong>Removed hops:</strong> ${removed}</div>
+        <div class="path-change-meta"><strong>Previous run:</strong> ${escapeHTML(details.previous_run_id ?? "-")} ${escapeHTML(details.previous_timestamp || "")}</div>
+        <div class="path-change-path"><strong>Previous path (${escapeHTML(details.previous_hop_count ?? 0)}):</strong> ${previous}</div>
+        <div class="path-change-path"><strong>Current path (${escapeHTML(details.current_hop_count ?? 0)}):</strong> ${current}</div>
       </details>
     `;
   }
@@ -66,16 +77,28 @@ function renderDetails(details) {
 }
 
 async function loadAlertHistory() {
+  const openAlertIds = new Set(
+    [...alertsPageList.querySelectorAll(".alert-item")]
+      .filter((row) => row.querySelector("details.alert-details")?.open)
+      .map((row) => row.dataset.alertId)
+  );
+
   const res = await fetch(`/api/alerts?limit=${encodeURIComponent(alertLimit.value)}`);
   const alerts = await res.json();
-  alertsPageList.innerHTML = "";
   if (!alerts.length) {
-    alertsPageList.innerHTML = '<div class="alert-empty">No alerts recorded.</div>';
+    alertsPageList.replaceChildren();
+    const empty = document.createElement("div");
+    empty.className = "alert-empty";
+    empty.textContent = "No alerts recorded.";
+    alertsPageList.appendChild(empty);
     return;
   }
+  const fragment = document.createDocumentFragment();
   alerts.forEach((alert) => {
     const row = document.createElement("div");
     row.className = `alert-item ${alert.severity}`;
+    row.dataset.alertId = String(alert.id);
+    const detailsOpen = openAlertIds.has(String(alert.id));
     row.innerHTML = `
       <div class="alert-row-main">
         <strong>${escapeHTML(alert.kind)}</strong>
@@ -85,10 +108,11 @@ async function loadAlertHistory() {
       </div>
       <div>${escapeHTML(alert.message)}</div>
       <small>run_id: ${escapeHTML(alert.run_id ?? "-")}</small>
-      ${renderDetails(alert.details)}
+      ${renderDetails(alert.details).replace("<details class=\"alert-details\">", `<details class="alert-details"${detailsOpen ? " open" : ""}>`)}
     `;
-    alertsPageList.appendChild(row);
+    fragment.appendChild(row);
   });
+  alertsPageList.replaceChildren(fragment);
 }
 
 alertLimit.addEventListener("change", loadAlertHistory);
@@ -108,5 +132,15 @@ clearAlertsBtn.addEventListener("click", async () => {
   }
   await loadAlertHistory();
 });
+
+refreshAlertsBtn.addEventListener("click", async () => {
+  refreshAlertsBtn.disabled = true;
+  refreshAlertsBtn.classList.add("refreshing");
+  try {
+    await loadAlertHistory();
+  } finally {
+    refreshAlertsBtn.disabled = false;
+    refreshAlertsBtn.classList.remove("refreshing");
+  }
+});
 loadAlertHistory();
-setInterval(loadAlertHistory, 30000);

@@ -24,6 +24,8 @@ from app.queries import (
     classify_status,
     effective_path_hop,
     effective_path_hops,
+    integer_hop_count,
+    last_path_change,
     service_reachability,
 )
 from app.scheduler import _evaluate_alerts
@@ -87,6 +89,44 @@ class CoreBehaviorTests(unittest.TestCase):
         self.assertEqual(status, "red")
         self.assertEqual(reasons, ["service port unreachable"])
 
+    def test_hop_counts_are_normalized_to_non_negative_integers(self):
+        self.assertEqual(integer_hop_count(12), 12)
+        self.assertEqual(integer_hop_count(12.0), 12)
+        self.assertIsNone(integer_hop_count(12.9))
+        self.assertIsNone(integer_hop_count(12.5))
+        self.assertIsNone(integer_hop_count(-1))
+        self.assertIsNone(integer_hop_count(None))
+
+    def test_last_path_change_returns_latest_successful_change(self):
+        older_change = self.add_run(
+            timestamp=dt.datetime(2026, 1, 1),
+            path_changed=True,
+            success=True,
+        )
+        newer_change = self.add_run(
+            timestamp=dt.datetime(2026, 1, 2),
+            path_changed=True,
+            success=True,
+        )
+        newer_no_change = self.add_run(
+            timestamp=dt.datetime(2026, 1, 3),
+            path_changed=False,
+            success=True,
+        )
+        self.add_run(
+            timestamp=dt.datetime(2026, 1, 4),
+            path_changed=True,
+            success=False,
+        )
+        self.session.commit()
+
+        result = last_path_change(self.session, "monitor.example")
+
+        self.assertEqual(result, newer_change.timestamp)
+        self.assertNotEqual(result, older_change.timestamp)
+        self.assertNotEqual(result, newer_no_change.timestamp)
+        self.assertIsNone(last_path_change(self.session, "never-seen.example"))
+
     def test_api_status_uses_endpoint_probe_when_no_service_ports_are_configured(self):
         run = self.add_run(
             endpoint_probe_protocol="tcp/443",
@@ -124,8 +164,37 @@ class CoreBehaviorTests(unittest.TestCase):
                 loss_critical_pct=10,
                 _auth=None,
             )
+
         self.assertEqual(result["status"], "green")
         self.assertIsNone(result["service_reachable"])
+
+    def test_api_latest_includes_effective_metric_thresholds(self):
+        run = self.add_run()
+        self.session.commit()
+        target = TargetConfig(
+            host=run.target,
+            label=run.target,
+            alert_latency_ms=100,
+            alert_jitter_ms=None,
+            alert_loss_pct=3,
+        )
+        session_factory = sessionmaker(bind=self.engine, expire_on_commit=False)
+
+        with (
+            patch.object(main, "SessionLocal", session_factory),
+            patch.object(main.cfg, "targets", [target]),
+            patch.object(main.cfg, "alert_latency_ms", 200),
+            patch.object(main.cfg, "alert_jitter_ms", 40),
+            patch.object(main.cfg, "alert_loss_pct", 5),
+            patch.object(main, "baseline_for_target", return_value={"latency_ms": None, "jitter_ms": None}),
+            patch.object(main, "last_path_change", return_value=None),
+        ):
+            result = main.api_latest(_auth=None)
+
+        self.assertEqual(
+            result[0]["effective_alerts"],
+            {"latency_ms": 100, "jitter_ms": 40, "loss_pct": 3},
+        )
 
     def test_time_range_rejects_bad_windows_and_custom_dates(self):
         for window, start, end in (

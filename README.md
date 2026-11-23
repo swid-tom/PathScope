@@ -49,6 +49,8 @@ The dashboard shows only the recent alert window. The `/alerts` page keeps the l
 
 The dashboard auto-refreshes every 15 seconds without reloading the page. Each section is replaced in a single step and charts are updated in place, so the scroll position, selected target, and path-rail scroll are kept. Refreshes pause while the browser tab is hidden or a status card is being dragged, and run immediately when the tab becomes visible again.
 
+Target-card latency, jitter, and loss capsules use the effective alert limits for that target: green below 75% of the limit, amber from 75% up to the limit, and red at or above the limit. Endpoint and path measurements use their corresponding latency, jitter, and loss limits. A changed path is shown in amber; an unchanged path is green.
+
 ## Appearance
 
 Open **Options** in the page header to change the monitored target, time window, theme, or page actions. Choose **Dark**, **Light**, or **Full**; your choice is saved in this browser and shared across the Dashboard, Admin, and Alerts pages.
@@ -188,7 +190,7 @@ Per-target overrides can be set from `/admin` or directly in YAML:
 - `POST /api/targets` / `PUT /api/targets/{host}` / `DELETE /api/targets/{host}` — target configuration
 - `POST /api/admin/password` — set a new admin password (requires current HTTP Basic authentication; new password must be at least 12 characters)
 - `GET /api/status?target=` — compact RAG/quality status for one target, suitable for external monitoring integrations
-- `GET /api/latest` — current status per target (for status cards / alerting integration)
+- `GET /api/latest` — current status per target, including effective alert limits used by the dashboard status cards
 - `GET /api/alerts?limit=50` — logged alert events
 - `GET /api/alerts?limit=10&recent_minutes=30` — recent dashboard alert window
 - `DELETE /api/alerts` — clear logged alert events only

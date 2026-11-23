@@ -28,6 +28,8 @@ from app.queries import (
     classify_status,
     effective_path_hop,
     effective_path_hops,
+    integer_hop_count,
+    last_path_change,
     quality_score,
     service_reachability,
 )
@@ -526,6 +528,7 @@ def api_status(
         ports = session.query(PortCheck).filter(PortCheck.run_id == run.id).all()
         reachable = service_reachability(run, ports)
         quality = quality_score(run, last_hop, ports)
+        last_change = last_path_change(session, target)
 
         status, reasons = classify_status(
             avg_ms,
@@ -562,7 +565,8 @@ def api_status(
             "service_reachable": reachable,
             "quality": quality,
             "path_changed": bool(run.path_changed),
-            "hop_count": last_hop.hop_num if last_hop else None,
+            "last_path_change": last_change.isoformat() + "Z" if last_change else None,
+            "hop_count": integer_hop_count(last_hop.hop_num) if last_hop else None,
             "timestamp": run.timestamp.isoformat() + "Z",
         }
     finally:
@@ -589,6 +593,7 @@ def api_latest(_auth: None = Depends(require_read_api_auth)):
             baseline = baseline_for_target(session, t.host, run.timestamp, cfg.baseline_days)
             ports = session.query(PortCheck).filter(PortCheck.run_id == run.id).all()
             quality = quality_score(run, last_hop, ports)
+            last_change = last_path_change(session, t.host)
             out.append(
                 {
                     "target": t.host,
@@ -606,7 +611,7 @@ def api_latest(_auth: None = Depends(require_read_api_auth)):
                     "dns_ms": run.dns_ms,
                     "success": run.success,
                     "error": run.error,
-                    "hop_count": last_hop.hop_num if last_hop else None,
+                    "hop_count": integer_hop_count(last_hop.hop_num) if last_hop else None,
                     "dest_avg_ms": last_hop.avg_ms if last_hop else None,
                     "dest_loss_pct": last_hop.loss_pct if last_hop else None,
                     "dest_jitter_ms": last_hop.stdev_ms if last_hop else None,
@@ -617,6 +622,12 @@ def api_latest(_auth: None = Depends(require_read_api_auth)):
                     "endpoint_error": run.endpoint_error,
                     "quality": quality,
                     "path_changed": bool(run.path_changed),
+                    "last_path_change": last_change.isoformat() + "Z" if last_change else None,
+                    "effective_alerts": {
+                        "latency_ms": t.alert_latency_ms if t.alert_latency_ms is not None else cfg.alert_latency_ms,
+                        "jitter_ms": t.alert_jitter_ms if t.alert_jitter_ms is not None else cfg.alert_jitter_ms,
+                        "loss_pct": t.alert_loss_pct if t.alert_loss_pct is not None else cfg.alert_loss_pct,
+                    },
                     "baseline": baseline,
                     "latency_deviation_pct": _pct_delta(last_hop.avg_ms if last_hop else None, baseline["latency_ms"]),
                     "jitter_deviation_pct": _pct_delta(last_hop.stdev_ms if last_hop else None, baseline["jitter_ms"]),
@@ -705,7 +716,7 @@ def api_summary(
                 {
                     "timestamp": run.timestamp.isoformat() + "Z",
                     "dns_ms": run.dns_ms,
-                    "hop_count": last_hop.hop_num if last_hop else None,
+                    "hop_count": integer_hop_count(last_hop.hop_num) if last_hop else None,
                     "avg_ms": last_hop.avg_ms if last_hop else None,
                     "loss_pct": last_hop.loss_pct if last_hop else None,
                     "jitter_ms": last_hop.stdev_ms if last_hop else None,
