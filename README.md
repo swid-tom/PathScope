@@ -111,14 +111,6 @@ before adding them. See the [AI-assisted development guidance](.github/copilot-i
 Windows via Docker Desktop for basic use):
 
 ```bash
-./start-docker.sh up --build -d
-```
-
-On Windows PowerShell, create the config file before starting Compose:
-
-```powershell
-if (Test-Path config.yaml -PathType Container) { throw "config.yaml is a directory; remove or rename it first." }
-if (-not (Test-Path config.yaml)) { Copy-Item config.example.yaml config.yaml }
 docker compose up --build -d
 ```
 
@@ -127,8 +119,8 @@ Then open [http://localhost:8000](http://localhost:8000)
 Rootless Podman can run the web app, but MTR path discovery may collapse to only the destination hop or fail raw-socket access depending on network mode. For a production utility VM, either run natively under systemd with a low-privilege user and capabilities, or use a rootful/container setup that preserves MTR behavior.
 
 The Compose file mounts `config.yaml` read/write so Admin changes are saved on the host.
-The launcher creates it from `config.example.yaml` when missing. `config.yaml` is local
-and excluded from Git. Admin sign-in uses HTTP Basic
+Before starting PathScope, Compose creates `config.yaml` from `config.example.yaml` if it
+does not exist. `config.yaml` is local and excluded from Git. Admin sign-in uses HTTP Basic
 authentication. On first startup, use **`admin` / `password`**; Admin will guide you
 through setting a new password (at least 12 characters). You can change it later from
 the same page. Until you do, keep PathScope on your own computer or trusted network.
