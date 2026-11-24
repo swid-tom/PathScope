@@ -6,8 +6,14 @@ services:
       - NET_RAW      # required by mtr for ICMP/UDP probing
       - NET_ADMIN
     volumes:
-      - ./data:/app/data
-      - ./config.yaml:/app/config.yaml
+      - type: bind
+        source: ./data
+        target: /app/data
+      - type: bind
+        source: ./config.yaml
+        target: /app/config.yaml
+        bind:
+          create_host_path: false
     ports:
       - "8000:8000"
     restart: unless-stopped
