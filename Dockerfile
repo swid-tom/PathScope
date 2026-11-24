@@ -11,9 +11,11 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 COPY app ./app
 COPY config.example.yaml ./config.yaml
+COPY docker-entrypoint.sh /usr/local/bin/pathscope-entrypoint
 
-RUN mkdir -p /app/data
+RUN chmod +x /usr/local/bin/pathscope-entrypoint && mkdir -p /app/data
 
 EXPOSE 8000
 
+ENTRYPOINT ["/usr/local/bin/pathscope-entrypoint"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -3,9 +3,8 @@ services:
     image: pathscope:local
     build: .
     container_name: pathscope-monitor
-    depends_on:
-      config-init:
-        condition: service_completed_successfully
+    environment:
+      PATHSCOPE_CONFIG: /host-config/config.yaml
     cap_add:
       - NET_RAW      # required by mtr for ICMP/UDP probing
       - NET_ADMIN
@@ -14,32 +13,8 @@ services:
         source: ./data
         target: /app/data
       - type: bind
-        source: ./config.yaml
-        target: /app/config.yaml
-        bind:
-          create_host_path: false
+        source: .
+        target: /host-config
     ports:
       - "8000:8000"
     restart: unless-stopped
-
-  config-init:
-    image: pathscope:local
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        if [ -d /workspace/config.yaml ]; then
-          if ! rmdir /workspace/config.yaml; then
-            echo "Error: config.yaml is a non-empty directory; rename it before retrying." >&2
-            exit 1
-          fi
-          echo "Removed the empty config.yaml directory left by an earlier startup."
-        fi
-        if [ ! -e /workspace/config.yaml ]; then
-          cp /workspace/config.example.yaml /workspace/config.yaml
-          chown --reference=/workspace /workspace/config.yaml
-          echo "Created config.yaml from config.example.yaml."
-        fi
-    volumes:
-      - type: bind
-        source: .
-        target: /workspace
