@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>PathScope Events</title>
+  <link rel="stylesheet" href="/static/style.css?v=event-history-1" />
+  <script src="/static/theme.js?v=compact-header-1" defer></script>
+</head>
+<body>
+  <header>
+    <div class="brand-group">
+      <a class="logo-link" href="/" aria-label="Return to PathScope dashboard">
+        <img class="app-logo" src="/static/pathscope-logo.svg?v=1" alt="PathScope" />
+      </a>
+      <div class="brand-block">
+        <div class="app-subtitle">Event History</div>
+      </div>
+    </div>
+    <div class="controls">
+      <details class="header-menu">
+        <summary aria-label="Open menu">Menu <span aria-hidden="true">⌄</span></summary>
+        <div class="header-menu-panel">
+          <section class="menu-section">
+            <h2>Events</h2>
+            <label>Limit:
+              <select id="eventLimit">
+                <option value="50">50</option>
+                <option value="100">100</option>
+                <option value="250">250</option>
+                <option value="500" selected>500</option>
+              </select>
+            </label>
+          </section>
+          <section class="menu-section">
+            <h2>Appearance</h2>
+            <label class="theme-control" title="Full mode shifts from deep navy at night to a lighter blue-toned palette in daytime, using your local time.">
+              Theme
+              <select id="themeSelect" aria-label="Color theme">
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+                <option value="full">Full</option>
+              </select>
+            </label>
+          </section>
+          <nav class="menu-actions" aria-label="Event navigation">
+            <a class="button-link" href="/">Dashboard</a>
+            <a class="button-link" href="/alerts">Alerts</a>
+            <a class="button-link" href="/admin">Admin</a>
+          </nav>
+        </div>
+      </details>
+    </div>
+  </header>
+
+  <div class="page-toolbar" aria-label="Event page actions">
+    <button id="refreshEventsBtn" class="icon-button" type="button" title="Refresh events" aria-label="Refresh events">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M20 11a8 8 0 1 0-2.34 5.66M20 11V5m0 6h-6" />
+      </svg>
+    </button>
+  </div>
+
+  <section class="event-history-section">
+    <h2>Saved event snapshots</h2>
+    <p class="event-history-intro">Path changes and probe incidents are listed newest first. Select an event to inspect its local measurements and external context.</p>
+    <div id="eventsPageList" class="event-history-list" aria-live="polite"></div>
+  </section>
+
+  <script src="/static/incident-context.js?v=event-history-1"></script>
+  <script src="/static/events.js?v=event-history-1"></script>
+</body>
+</html>

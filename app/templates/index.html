@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <title>PathScope — Network Path &amp; Edge Monitor</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-  <link rel="stylesheet" href="/static/style.css?v=target-health-colors-1" />
+  <link rel="stylesheet" href="/static/style.css?v=event-history-1" />
   <script src="/static/theme.js?v=compact-header-1" defer></script>
 </head>
 <body>
@@ -18,8 +18,12 @@
       </div>
     </div>
     <div class="controls">
+      <a class="button-link header-alerts-link" href="/alerts" title="Alerts from the last 30 minutes">
+        Alerts
+        <span id="recentAlertCount" class="header-alert-count" aria-label="0 alerts in the last 30 minutes" aria-live="polite">0</span>
+      </a>
       <details class="header-menu">
-        <summary aria-label="Open options menu">Options <span aria-hidden="true">⌄</span></summary>
+        <summary aria-label="Open menu">Menu <span aria-hidden="true">⌄</span></summary>
         <div class="header-menu-panel">
           <section class="menu-section">
             <h2>Monitoring</h2>
@@ -40,8 +44,8 @@
               </select>
             </label>
             <div id="customWindowControls" class="custom-window hidden">
-              <label>Start:<input id="customStart" type="datetime-local" /></label>
-              <label>End:<input id="customEnd" type="datetime-local" /></label>
+              <label>Start:<input id="customStart" type="datetime-local" step="1" /></label>
+              <label>End:<input id="customEnd" type="datetime-local" step="1" /></label>
               <button id="applyCustomWindow" type="button">Apply</button>
             </div>
           </section>
@@ -58,8 +62,8 @@
           </section>
           <nav class="menu-actions" aria-label="Dashboard actions">
             <button id="exportBtn" type="button">Export CSV</button>
+            <a class="button-link" href="/events">Events</a>
             <a class="button-link" href="/admin">Admin</a>
-            <a class="button-link" href="/alerts">Alerts</a>
             <button id="helpBtn" type="button">Quick help</button>
           </nav>
         </div>
@@ -87,19 +91,23 @@
         <p>Use the reason line under the score to see the main signal affecting that target.</p>
       </details>
       <details>
-        <summary>Recent alerts</summary>
-        <p>This strip shows up to five recent alerts from the short dashboard window. It is meant for quick awareness, not long-term review.</p>
-        <p>Use Alerts to review the full log and expand alert details.</p>
+        <summary>Alerts</summary>
+        <p>The dashboard strip previews recent alerts. Use the Alerts button in the header to review the full history and expand alert details.</p>
       </details>
       <details>
         <summary>Charts</summary>
         <p>The latency chart overlays path latency, endpoint RTT, jitter, path loss, and endpoint loss when available.</p>
+        <p>Click and drag across the latency chart to zoom to a time range. After zooming, drag the vertical time marker to update the target cards to the latest recorded data at or before that time. The charts, path details, and CSV export use the selected range.</p>
         <p>The hop-count chart shows path stability. Sudden changes can indicate routing or edge-selection changes.</p>
       </details>
       <details>
         <summary>Path view</summary>
         <p>The horizontal path view shows the latest visible route for the selected target. Hidden or non-responding hops can be shown with the checkbox.</p>
-        <p>The hop table below gives raw hop latency, loss, jitter, ASN, org, and geography details.</p>
+        <p>The hop table below gives the run timestamp, raw hop latency, loss, jitter, BGP origin ASN and prefix, organization, and approximate geography. ASN source is shown on hover. Its Network / ISP column labels Tier 1 providers, private addresses, CGNAT, and other network types.</p>
+      </details>
+      <details>
+        <summary>Path change context</summary>
+        <p>On path changes and probe failures, PathScope records event snapshots. The dashboard shows the four latest summaries; use Events for full event details. External evidence is correlational, not proof of cause.</p>
       </details>
       <details>
         <summary>Time windows and export</summary>
@@ -115,23 +123,42 @@
   </aside>
   <div id="helpBackdrop" class="help-backdrop hidden"></div>
 
+  <div id="historicalSnapshotNotice" class="historical-snapshot-notice hidden" role="status" aria-live="polite">
+    <span>Showing the latest recorded card data at or before <strong id="historicalSnapshotTime"></strong>.</span>
+    <button id="returnLiveSnapshotBtn" type="button">Return to live</button>
+  </div>
   <section id="statusCards" class="cards"></section>
 
   <section class="alerts-section">
     <div class="section-heading compact-heading">
       <h2>Recent alerts</h2>
       <div class="alert-heading-actions">
-        <a href="/alerts">View history</a>
-        <button id="toggleAlertsBtn" type="button">Minimize</button>
+        <button id="toggleAlertsBtn" type="button" aria-expanded="true">Minimize</button>
       </div>
     </div>
     <div id="alertsList" class="alerts-list"></div>
   </section>
 
+  <section class="incident-context-section">
+    <div class="section-heading compact-heading">
+      <h2>Recent path &amp; probe events</h2>
+      <a class="button-link" href="/events">View all events</a>
+    </div>
+    <div id="incidentContext" class="incident-context event-summary-grid" role="status" aria-live="polite">
+      No path changes or probe failures in the selected window.
+    </div>
+  </section>
+
   <section class="chart-section">
-    <h2>Destination latency &amp; loss over time</h2>
+    <div class="chart-section-heading">
+      <div>
+        <h2>Destination latency &amp; loss over time</h2>
+        <p class="chart-range-hint">Drag to zoom; then drag the vertical marker to show target-card data at that time.</p>
+      </div>
+      <button id="resetChartZoomBtn" class="chart-zoom-reset hidden" type="button">Reset zoom</button>
+    </div>
     <div class="chart-frame chart-frame-large">
-      <canvas id="latencyChart"></canvas>
+      <canvas id="latencyChart" aria-label="Destination metrics over time. Drag to zoom to a range, then drag the vertical marker to inspect target-card data at a time."></canvas>
     </div>
   </section>
 
@@ -145,22 +172,27 @@
   <section>
     <div class="section-heading">
       <h2>Latest path (MTR)</h2>
-      <label class="inline-check"><input id="showUnknownHops" type="checkbox" /> Show ??? hops</label>
+      <div class="path-heading-controls">
+        <label class="inline-check"><input id="showUnknownHops" type="checkbox" /> Show ??? hops</label>
+      </div>
     </div>
+    <div id="unknownHopsStatus" class="unknown-hops-status hidden" role="status" aria-live="polite"></div>
     <div id="pathViz" class="path-viz"></div>
     <div id="pathHoverDetails" class="path-hover-details">Hover a node for hop details.</div>
     <table id="hopsTable">
       <thead>
         <tr>
-          <th>#</th><th>Host</th><th>Loss %</th><th>Sent</th>
+          <th>#</th><th>Timestamp (ET)</th><th>Network / ISP</th><th>Host</th><th>Loss %</th><th>Sent</th>
           <th>Last</th><th>Avg</th><th>Best</th><th>Worst</th><th>StDev</th>
-          <th>ASN</th><th>Org</th><th>Country</th><th>City</th>
+          <th>ASN</th><th>Org</th><th title="Prefix announced by the BGP origin ASN">BGP prefix</th><th>Country</th><th>City</th>
         </tr>
       </thead>
       <tbody></tbody>
     </table>
   </section>
 
-    <script src="/static/dashboard.js?v=target-health-colors-1"></script>
+    <script src="/static/alert-details.js?v=event-history-1"></script>
+    <script src="/static/incident-context.js?v=event-history-1"></script>
+    <script src="/static/dashboard.js?v=event-history-1"></script>
 </body>
 </html>

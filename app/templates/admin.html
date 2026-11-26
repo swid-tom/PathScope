@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <title>PathScope Admin</title>
-  <link rel="stylesheet" href="/static/style.css?v=path-only-colors-1" />
+  <link rel="stylesheet" href="/static/style.css?v=event-history-1" />
   <script src="/static/theme.js?v=compact-header-1" defer></script>
 </head>
 <body data-password-change-required="{{ 'true' if password_change_required else 'false' }}">
@@ -18,7 +18,7 @@
     </div>
     <div class="controls">
       <details class="header-menu">
-        <summary aria-label="Open options menu">Options <span aria-hidden="true">⌄</span></summary>
+        <summary aria-label="Open menu">Menu <span aria-hidden="true">⌄</span></summary>
         <div class="header-menu-panel">
           <section class="menu-section">
             <h2>Appearance</h2>
@@ -33,6 +33,7 @@
           </section>
           <nav class="menu-actions" aria-label="Administration navigation">
             <a class="button-link" href="/">Dashboard</a>
+            <a class="button-link" href="/events">Events</a>
             <button id="helpBtn" type="button">Quick help</button>
           </nav>
         </div>
@@ -74,6 +75,10 @@
         <summary>Thresholds</summary>
         <p>Per-target thresholds override global defaults for latency, jitter, loss, and path-change alerts.</p>
       </details>
+      <details>
+        <summary>Status-page correlation</summary>
+        <p>PathScope checks for a matching public status page after a path change or probe issue. A configured URL overrides discovery. Only public HTTPS JSON status summaries are queried; status-page and BGP signals are correlation, not proof of cause.</p>
+      </details>
     </div>
   </aside>
   <div id="helpBackdrop" class="help-backdrop hidden"></div>
@@ -101,6 +106,7 @@
   {% if not password_change_required %}
   <section class="target-admin">
     <h2>Target configuration</h2>
+    <p>Leave the status-page URL blank for automatic discovery, or enter a public HTTPS JSON summary URL to override it. Checks run only after a path change or probe issue.</p>
     <form id="targetForm" class="admin-grid">
       <input id="targetHost" name="host" type="text" placeholder="host.example.com" autocomplete="off" required />
       <input id="targetLabel" name="label" type="text" placeholder="Display label" autocomplete="off" />
@@ -122,6 +128,7 @@
       <input id="endpointCount" type="number" min="1" max="50" placeholder="Probe count" />
       <input id="endpointPort" type="number" min="1" max="65535" placeholder="Probe port" />
       <input id="targetPorts" name="ports" type="text" placeholder="TCP/TLS service ports (optional)" aria-label="TCP/TLS service ports" title="Optional comma-separated TCP/TLS service ports to check, such as 443 or 443,3478. Leave blank for no TCP/TLS service checks." />
+      <input id="statusPageUrl" type="url" maxlength="512" placeholder="Optional manual status-page URL" aria-label="Public status-page JSON URL override" title="Leave blank for discovery, or enter an HTTPS JSON summary URL to override it." />
       <select id="dscpSelect" aria-label="DSCP marking">
         <option value="">DSCP default</option>
         <option value="0">CS0 / Best Effort (0)</option>
@@ -210,6 +217,6 @@
   </section>
   {% endif %}
 
-  <script src="/static/admin.js?v=admin-password-1"></script>
+  <script src="/static/admin.js?v=incident-context-1"></script>
 </body>
 </html>

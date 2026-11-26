@@ -126,6 +126,7 @@ function formPayload() {
     endpoint_probe_count: endpointCount,
     endpoint_probe_port: endpointPort,
     dscp: dscpValue,
+    status_page_url: document.getElementById("statusPageUrl").value.trim() || null,
   };
 }
 
@@ -143,6 +144,7 @@ function clearForm() {
   document.getElementById("endpointPort").value = "";
   updateEndpointPortState();
   document.getElementById("dscpSelect").value = "";
+  document.getElementById("statusPageUrl").value = "";
   document.getElementById("targetHost").disabled = false;
   saveTargetBtn.textContent = "Add Target";
 }
@@ -179,6 +181,7 @@ function renderTargets() {
         <span>Path ${target.alert_path_change ?? target.effective_alerts.path_change ? "on" : "off"}</span>
         <span>Endpoint ${target.effective_endpoint_probe.enabled ? `${escapeHTML(target.effective_endpoint_probe.protocol)}/${escapeHTML(target.effective_endpoint_probe.port ?? "default")} x${escapeHTML(target.effective_endpoint_probe.count)}` : "off"}</span>
         <span>DSCP ${escapeHTML(target.dscp ?? "default")}${target.tos_byte !== null ? ` / TOS ${escapeHTML(target.tos_byte)}` : ""}</span>
+        <span>Status feed ${target.status_page_url ? "configured" : "not configured"}</span>
       </div>
       <div class="target-actions">
         <button type="button" data-action="edit" data-host="${escapeHTML(target.host)}">Edit</button>
@@ -214,6 +217,7 @@ targetRows.addEventListener("click", async (event) => {
     document.getElementById("endpointPort").value = target.endpoint_probe_port ?? "";
     updateEndpointPortState();
     document.getElementById("dscpSelect").value = target.dscp ?? "";
+    document.getElementById("statusPageUrl").value = target.status_page_url ?? "";
     saveTargetBtn.textContent = "Update Target";
     targetMessage.textContent = `Editing ${target.host}`;
     return;

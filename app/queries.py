@@ -53,17 +53,15 @@ def integer_hop_count(value: int | float | None) -> int | None:
     return hop_count if hop_count >= 0 else None
 
 
-def last_path_change(session, target: str) -> dt.datetime | None:
-    run = (
-        session.query(Run)
-        .filter(
-            Run.target == target,
-            Run.success.is_(True),
-            Run.path_changed.is_(True),
-        )
-        .order_by(Run.timestamp.desc())
-        .first()
+def last_path_change(session, target: str, at: dt.datetime | None = None) -> dt.datetime | None:
+    query = session.query(Run).filter(
+        Run.target == target,
+        Run.success.is_(True),
+        Run.path_changed.is_(True),
     )
+    if at is not None:
+        query = query.filter(Run.timestamp <= at)
+    run = query.order_by(Run.timestamp.desc()).first()
     return run.timestamp if run else None
 
 

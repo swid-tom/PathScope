@@ -18,7 +18,7 @@ Every 60s by default, each target runs:
 
 1. **DNS timing and resolved-IP tracking** using the system/local resolver, so internal DNS,
   VPN DNS, and split-horizon names can be monitored.
-2. **TCP/443 MTR path discovery** for hop-by-hop path, loss, latency, jitter/stdev, and ASN/org enrichment.
+2. **TCP/443 MTR path discovery** for hop-by-hop path, loss, latency, jitter/stdev, BGP origin ASN, announced prefix, and location enrichment.
 3. **Final-destination endpoint probe** via per-target TCP-connect or ICMP ping settings.
 4. **TCP connect checks** to configured target ports.
 5. **TLS handshake timing** with SNI, including certificate-expiry warning text.
@@ -35,8 +35,10 @@ Results are stored in SQLite (`data/monitor.db`) and shown in a FastAPI + Chart.
 - latency/loss/jitter charts
 - hop-count/path stability chart
 - custom time windows
+- drag-to-select zoom on the destination latency chart; zoomed ranges also filter the hop-count chart, path view, and CSV export
+- draggable time marker on the zoomed latency chart to show each target card's latest recorded state at or before the selected time
 - horizontal path visualization
-- latest hop table
+- latest hop table with ET run timestamp and a network/ISP classification column
 - CSV export
 
 ## Pages
@@ -44,16 +46,19 @@ Results are stored in SQLite (`data/monitor.db`) and shown in a FastAPI + Chart.
 - Dashboard: `http://localhost:8000/`
 - Admin/config: `http://localhost:8000/admin`
 - Alert history: `http://localhost:8000/alerts`
+- Event snapshots: `http://localhost:8000/events`
 
-The dashboard shows only the recent alert window. The `/alerts` page keeps the logged alert history until you clear alerts or prune the database.
+The dashboard shows the four latest event summaries for the selected target and time window. Open **Events** for the saved snapshots and full context; path-change alerts link directly to their event. Alert cards use friendly names and summaries, with severity shown as a clear label; expand **Details** for measurements and path context. Hover over a dashboard alert to open its details inline or jump to that alert in history. The `/alerts` page keeps the logged alert history until you clear alerts or prune the database.
 
 The dashboard auto-refreshes every 15 seconds without reloading the page. Each section is replaced in a single step and charts are updated in place, so the scroll position, selected target, and path-rail scroll are kept. Refreshes pause while the browser tab is hidden or a status card is being dragged, and run immediately when the tab becomes visible again.
 
 Target-card latency, jitter, and loss capsules use the effective alert limits for that target: green below 75% of the limit, amber from 75% up to the limit, and red at or above the limit. Endpoint and path measurements use their corresponding latency, jitter, and loss limits. A changed path is shown in amber; an unchanged path is green.
 
+The latest-path table includes the BGP origin ASN and announced prefix for globally routable hop IPs, using [Team Cymru's public IP-to-ASN mapping service](https://www.team-cymru.com/ip-asn-mapping); [IP-API](https://ip-api.com/) provides location fields. The table also identifies recognized Tier 1 ASNs, private IP ranges, CGNAT/shared addresses, loopback, link-local, multicast, reserved/non-public, public, and non-responsive hops. Private and CGNAT addresses are not sent to these lookup services. Tier 1 matches use exact ASN values from a curated list: AS174, AS701, AS1299, AS2914, AS3257, AS3320, AS3356, AS3491, AS4134, AS5511, AS6453, AS6762, AS7018, and AS12956. Tier 1 classification varies by source, so these labels are operational hints rather than a definitive ranking.
+
 ## Appearance
 
-Open **Options** in the page header to change the monitored target, time window, theme, or page actions. Choose **Dark**, **Light**, or **Full**; your choice is saved in this browser and shared across the Dashboard, Admin, and Alerts pages.
+Open **Options** in the page header to change the monitored target, time window, theme, or page actions. Choose **Dark**, **Light**, or **Full**; your choice is saved in this browser and shared across the Dashboard, Admin, Alerts, and Events pages.
 
 **Full** gradually shifts from deep navy at night to a lighter blue-toned palette in daytime, then dims toward evening, using the browser's local time. It keeps foreground text high-contrast throughout. The theme refreshes periodically and when a background tab becomes active.
 
@@ -182,7 +187,32 @@ Per-target overrides can be set from `/admin` or directly in YAML:
   endpoint_probe_protocol: tcp
   endpoint_probe_count: 5
   endpoint_probe_port: 443
+  # Optional Statuspage-compatible JSON summary URL, checked only on an incident.
+  status_page_url: null
 ```
+
+### Path change context
+
+The dashboard records a context snapshot when a path changes or a DNS/MTR,
+endpoint, or configured TCP/TLS service check newly fails (or endpoint loss
+appears). It includes local probe evidence, RIPEstat BGPlay
+updates for the destination's BGP prefix, and RIPEstat RPKI validation for its
+origin ASN. When a status-page URL is not configured, PathScope checks a small
+set of known provider mappings and a conventional `status.<domain>` endpoint for
+a Statuspage-compatible JSON summary. The incident panel shows the candidate URL,
+discovery source, and confidence. A manually configured public HTTPS status-summary
+JSON URL overrides discovery. Status endpoints are queried only when one of those
+events occurs; they must return JSON directly, without a redirect, resolve to
+public IP addresses, and must not require URL credentials or query-string tokens.
+An undiscovered or healthy status feed is not evidence that the service is healthy.
+Known mappings currently cover GitHub, Cloudflare, Discord, Fastly, Zoom, and
+Atlassian; direct `*.statuspage.io` targets are also recognized.
+
+The panel distinguishes local measurements from external signals. RIPEstat
+collectors do not necessarily observe the monitored network's exact route, and a
+status-page incident or BGP update is correlation evidence, not proof of cause.
+Each run's snapshot is included in `GET /api/runs` as `incident_context`; the
+`/api/incident-context` endpoint returns the latest snapshot in the selected window.
 
 ## API
 
@@ -190,9 +220,12 @@ Per-target overrides can be set from `/admin` or directly in YAML:
 - `POST /api/targets` / `PUT /api/targets/{host}` / `DELETE /api/targets/{host}` — target configuration
 - `POST /api/admin/password` — set a new admin password (requires current HTTP Basic authentication; new password must be at least 12 characters)
 - `GET /api/status?target=` — compact RAG/quality status for one target, suitable for external monitoring integrations
-- `GET /api/latest` — current status per target, including effective alert limits used by the dashboard status cards
+- `GET /api/latest` — current status per target, including effective alert limits used by the dashboard status cards; add `?at=<iso_timestamp>` to return the latest recorded status at or before that time
 - `GET /api/alerts?limit=50` — logged alert events
 - `GET /api/alerts?limit=10&recent_minutes=30` — recent dashboard alert window
+- `GET /api/alerts?alert_id=<id>` — retrieve a specific alert event
+- `GET /api/alerts/count?recent_minutes=30` — count of recent alert events for the dashboard badge
+- `GET /api/events?limit=100` — saved event snapshots; optional `target`, `event_id`, and time-window filters
 - `DELETE /api/alerts` — clear logged alert events only
 - `GET /api/maintenance/stats` — row counts and DB size
 - `GET /api/settings/retention` / `PUT /api/settings/retention` — automatic prune retention days
@@ -200,6 +233,7 @@ Per-target overrides can be set from `/admin` or directly in YAML:
 - `POST /api/maintenance/vacuum` — compact SQLite DB/WAL
 - `GET /api/summary?target=&window=1h|24h|7d|30d|custom` — time series for charts
 - `GET /api/runs?target=&window=&limit=` — raw run list
+- `GET /api/incident-context?target=&window=` — latest path/probe event context in the selected window
 - `GET /api/runs/{id}/hops` — full hop-by-hop path for one run
 - `GET /api/export.csv?target=&window=` — CSV export for reports
 
@@ -266,9 +300,11 @@ unreachable.
   Webhooks receive JSON with `target`, `severity`, `kind`, `message`, and `run_id`.
   Individual targets can override `alert_latency_ms`, `alert_jitter_ms`, `alert_loss_pct`,
   and `alert_path_change` from the `/admin` page or directly in `config.yaml`.
-- **GeoIP accuracy**: `ip-api.com`'s free tier is rate-limited (45 req/min) and best-effort.
-  For production-scale or offline use, swap `app/probes/geoip.py` to a local MaxMind
-  GeoLite2 `.mmdb` file via the `geoip2` package instead of the HTTP calls.
+- **IP enrichment**: public hop IPs are sent to Team Cymru for BGP origin/prefix data and
+  to `ip-api.com` for location data. Results are cached in memory using `geoip.cache_ttl_seconds`;
+  the IP-API free tier is rate-limited (45 req/min). Both lookups are best-effort.
+  For production-scale or offline use, replace the GeoIP HTTP lookup with a local MaxMind
+  GeoLite2 `.mmdb` file via the `geoip2` package.
 - **Multiple vantage points**: you can run this same container from multiple sites/regions
   (branch offices, cloud regions, home ISP) against
   the same or a shared dashboard/DB to compare path/latency by location — that's the

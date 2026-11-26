@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import hashlib
+import ipaddress
 import io
 import json
 import logging
@@ -16,7 +17,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 from starlette.requests import Request
 
@@ -33,6 +34,7 @@ from app.queries import (
     quality_score,
     service_reachability,
 )
+from app.probes.incident_context import normalize_status_page_url
 from app.scheduler import schedule_target_probe, start_scheduler, unschedule_target_probe
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -43,6 +45,29 @@ templates = Jinja2Templates(directory="app/templates")
 security = HTTPBasic(auto_error=False)
 MAX_CHART_POINTS = 2000
 BOOTSTRAP_ADMIN_PASSWORD_SHA256 = "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"
+TIER1_ASN_PROVIDERS = {
+    174: "Cogent Communications",
+    701: "Verizon",
+    1299: "Arelion",
+    2914: "NTT",
+    3257: "GTT",
+    3320: "Deutsche Telekom",
+    3356: "Lumen",
+    3491: "PCCW Global",
+    4134: "China Telecom",
+    5511: "Orange",
+    6453: "Tata Communications",
+    6762: "Telecom Italia Sparkle",
+    7018: "AT&T",
+    12956: "Telxius",
+}
+CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+PRIVATE_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("fc00::/7"),
+)
 
 cfg = load_config()
 scheduler = None
@@ -63,6 +88,12 @@ class TargetCreate(BaseModel):
     endpoint_probe_count: Optional[int] = Field(default=None, ge=1, le=50)
     endpoint_probe_port: Optional[int] = Field(default=None, ge=1, le=65535)
     dscp: Optional[int] = Field(default=None, ge=0, le=63)
+    status_page_url: Optional[str] = Field(default=None, max_length=512)
+
+    @field_validator("status_page_url")
+    @classmethod
+    def validate_status_page_url(cls, value: str | None) -> str | None:
+        return normalize_status_page_url(value)
 
 
 class RetentionSettings(BaseModel):
@@ -192,6 +223,11 @@ def alerts(request: Request):
     return templates.TemplateResponse("alerts.html", {"request": request})
 
 
+@app.get("/events")
+def event_history(request: Request):
+    return templates.TemplateResponse("events.html", {"request": request})
+
+
 def _window_start(window: str) -> dt.datetime:
     now = dt.datetime.utcnow()
     mapping = {"1h": 1, "24h": 24, "7d": 24 * 7, "30d": 24 * 30}
@@ -251,6 +287,61 @@ def _json_list(value: str | None) -> list[str]:
         return []
 
 
+def _json_object(value: str | None) -> dict | None:
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except ValueError:
+        log.error("Stored incident context is not valid JSON")
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _tier1_provider_for_asn(asn: Optional[str]) -> Optional[str]:
+    if not asn:
+        return None
+    for origin in asn.strip().upper().split(","):
+        parts = origin.strip().split(maxsplit=1)
+        if not parts or not parts[0].startswith("AS"):
+            continue
+        number = parts[0][2:]
+        if number.isascii() and number.isdecimal():
+            provider = TIER1_ASN_PROVIDERS.get(int(number))
+            if provider:
+                return provider
+    return None
+
+
+def _classify_hop_network(host: Optional[str], asn: Optional[str]) -> tuple[str, str]:
+    if not host or host.strip() == "???":
+        return "no-response", "No response"
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        provider = _tier1_provider_for_asn(asn)
+        if provider:
+            return "tier1", f"Tier 1 ISP — {provider}"
+        return ("public", "Public AS network") if asn else ("unknown", "Network unknown")
+
+    if address.is_loopback:
+        return "loopback", "Loopback"
+    if address.is_link_local:
+        return "link-local", "Link-local"
+    if address.version == 4 and address in CGNAT_NETWORK:
+        return "cgnat", "CGNAT / shared address"
+    if any(network.version == address.version and address in network for network in PRIVATE_NETWORKS):
+        return "private", "Private network"
+    if address.is_multicast:
+        return "multicast", "Multicast"
+    if address.is_global:
+        provider = _tier1_provider_for_asn(asn)
+        if provider:
+            return "tier1", f"Tier 1 ISP — {provider}"
+        return "public", "Public network"
+    return "reserved", "Reserved / non-public"
+
+
 @app.get("/api/targets")
 def api_targets(_auth: None = Depends(require_read_api_auth)):
     return [_target_to_dict(t) for t in cfg.targets]
@@ -282,6 +373,7 @@ def api_add_target(target: TargetCreate, _auth: None = Depends(require_admin_rea
         endpoint_probe_count=target.endpoint_probe_count,
         endpoint_probe_port=target.endpoint_probe_port,
         dscp=target.dscp,
+        status_page_url=target.status_page_url,
     )
     _save_targets_to_config([*cfg.targets, new_target])
     cfg.targets.append(new_target)
@@ -318,6 +410,7 @@ def api_update_target(host: str, target: TargetCreate, _auth: None = Depends(req
         endpoint_probe_count=target.endpoint_probe_count,
         endpoint_probe_port=target.endpoint_probe_port,
         dscp=target.dscp,
+        status_page_url=target.status_page_url,
     )
     target_index = cfg.targets.index(existing)
     updated_targets = list(cfg.targets)
@@ -450,6 +543,7 @@ def _target_to_dict(target: TargetConfig) -> dict:
         "endpoint_probe_count": target.endpoint_probe_count,
         "endpoint_probe_port": target.endpoint_probe_port,
         "dscp": target.dscp,
+        "status_page_url": target.status_page_url,
         "tos_byte": (target.dscp << 2) if target.dscp is not None else None,
         "effective_alerts": {
             "latency_ms": target.alert_latency_ms if target.alert_latency_ms is not None else cfg.alert_latency_ms,
@@ -494,6 +588,8 @@ def _target_to_config(target: TargetConfig) -> dict:
         data["endpoint_probe_port"] = target.endpoint_probe_port
     if target.dscp is not None:
         data["dscp"] = target.dscp
+    if target.status_page_url is not None:
+        data["status_page_url"] = target.status_page_url
     return data
 
 
@@ -574,17 +670,19 @@ def api_status(
 
 
 @app.get("/api/latest")
-def api_latest(_auth: None = Depends(require_read_api_auth)):
+def api_latest(
+    at: Optional[str] = None,
+    _auth: None = Depends(require_read_api_auth),
+):
+    snapshot_at = _parse_client_datetime(at)
     session = SessionLocal()
     try:
         out = []
         for t in cfg.targets:
-            run = (
-                session.query(Run)
-                .filter(Run.target == t.host)
-                .order_by(Run.timestamp.desc())
-                .first()
-            )
+            query = session.query(Run).filter(Run.target == t.host)
+            if snapshot_at is not None:
+                query = query.filter(Run.timestamp <= snapshot_at)
+            run = query.order_by(Run.timestamp.desc()).first()
             if not run:
                 out.append({"target": t.host, "label": t.label, "status": "no data"})
                 continue
@@ -593,7 +691,7 @@ def api_latest(_auth: None = Depends(require_read_api_auth)):
             baseline = baseline_for_target(session, t.host, run.timestamp, cfg.baseline_days)
             ports = session.query(PortCheck).filter(PortCheck.run_id == run.id).all()
             quality = quality_score(run, last_hop, ports)
-            last_change = last_path_change(session, t.host)
+            last_change = last_path_change(session, t.host, at=snapshot_at)
             out.append(
                 {
                     "target": t.host,
@@ -652,11 +750,14 @@ def api_latest(_auth: None = Depends(require_read_api_auth)):
 def api_alerts(
     limit: int = Query(50, ge=1, le=500),
     recent_minutes: Optional[int] = Query(None, ge=1, le=10080),
+    alert_id: Optional[int] = Query(None, ge=1),
     _auth: None = Depends(require_read_api_auth),
 ):
     session = SessionLocal()
     try:
         query = session.query(AlertEvent)
+        if alert_id is not None:
+            query = query.filter(AlertEvent.id == alert_id)
         if recent_minutes is not None:
             cutoff = dt.datetime.utcnow() - dt.timedelta(minutes=recent_minutes)
             query = query.filter(AlertEvent.timestamp >= cutoff)
@@ -674,6 +775,20 @@ def api_alerts(
             }
             for event in events
         ]
+    finally:
+        session.close()
+
+
+@app.get("/api/alerts/count")
+def api_alert_count(
+    recent_minutes: int = Query(30, ge=1, le=10080),
+    _auth: None = Depends(require_read_api_auth),
+):
+    session = SessionLocal()
+    try:
+        cutoff = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) - dt.timedelta(minutes=recent_minutes)
+        count = session.query(AlertEvent).filter(AlertEvent.timestamp >= cutoff).count()
+        return {"count": count}
     finally:
         session.close()
 
@@ -767,8 +882,77 @@ def api_runs(
                 "endpoint_avg_ms": r.endpoint_avg_ms,
                 "endpoint_loss_pct": r.endpoint_loss_pct,
                 "endpoint_jitter_ms": r.endpoint_jitter_ms,
+                "incident_context": _json_object(r.incident_context_json),
             }
             for r in runs
+        ]
+    finally:
+        session.close()
+
+
+@app.get("/api/incident-context")
+def api_incident_context(
+    target: str,
+    window: str = "24h",
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    _auth: None = Depends(require_read_api_auth),
+):
+    session = SessionLocal()
+    try:
+        since, until = _time_range(window, start, end)
+        query = (
+            session.query(Run)
+            .filter(
+                Run.target == target,
+                Run.timestamp >= since,
+                Run.incident_context_json.isnot(None),
+            )
+        )
+        if until is not None:
+            query = query.filter(Run.timestamp <= until)
+        run = query.order_by(Run.timestamp.desc()).first()
+        if run is None:
+            return {"timestamp": None, "context": None}
+        return {
+            "timestamp": run.timestamp.isoformat() + "Z",
+            "context": _json_object(run.incident_context_json),
+        }
+    finally:
+        session.close()
+
+
+@app.get("/api/events")
+def api_events(
+    limit: int = Query(100, ge=1, le=500),
+    target: Optional[str] = None,
+    event_id: Optional[int] = Query(None, ge=1),
+    window: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    _auth: None = Depends(require_read_api_auth),
+):
+    session = SessionLocal()
+    try:
+        query = session.query(Run).filter(Run.incident_context_json.isnot(None))
+        if target:
+            query = query.filter(Run.target == target)
+        if event_id is not None:
+            query = query.filter(Run.id == event_id)
+        if window is not None:
+            since, until = _time_range(window, start, end)
+            query = query.filter(Run.timestamp >= since)
+            if until is not None:
+                query = query.filter(Run.timestamp <= until)
+        runs = query.order_by(Run.timestamp.desc()).limit(limit).all()
+        return [
+            {
+                "id": run.id,
+                "target": run.target,
+                "timestamp": run.timestamp.isoformat() + "Z",
+                "context": _json_object(run.incident_context_json),
+            }
+            for run in runs
         ]
     finally:
         session.close()
@@ -782,24 +966,29 @@ def api_run_hops(run_id: int, _auth: None = Depends(require_read_api_auth)):
         if not run:
             raise HTTPException(status_code=404, detail="run not found")
         hops = session.query(Hop).filter(Hop.run_id == run_id).order_by(Hop.hop_num.asc()).all()
-        return [
-            {
-                "hop_num": h.hop_num,
-                "host": h.host,
-                "loss_pct": h.loss_pct,
-                "sent": h.sent,
-                "last_ms": h.last_ms,
-                "avg_ms": h.avg_ms,
-                "best_ms": h.best_ms,
-                "worst_ms": h.worst_ms,
-                "stdev_ms": h.stdev_ms,
-                "asn": h.asn,
-                "org": h.org,
-                "country": h.country,
-                "city": h.city,
-            }
-            for h in hops
-        ]
+        result = []
+        for hop in hops:
+            network_class, network_type = _classify_hop_network(hop.host, hop.asn)
+            result.append({
+                "hop_num": hop.hop_num,
+                "host": hop.host,
+                "loss_pct": hop.loss_pct,
+                "sent": hop.sent,
+                "last_ms": hop.last_ms,
+                "avg_ms": hop.avg_ms,
+                "best_ms": hop.best_ms,
+                "worst_ms": hop.worst_ms,
+                "stdev_ms": hop.stdev_ms,
+                "asn": hop.asn,
+                "asn_source": hop.asn_source,
+                "bgp_prefix": hop.bgp_prefix,
+                "network_class": network_class,
+                "network_type": network_type,
+                "org": hop.org,
+                "country": hop.country,
+                "city": hop.city,
+            })
+        return result
     finally:
         session.close()
 

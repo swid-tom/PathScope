@@ -38,45 +38,12 @@ function fmtEastern(timestamp) {
   }).format(new Date(timestamp));
 }
 
-function renderDetails(details) {
-  if (!details || !Object.keys(details).length) return "";
-  if (details.current_path || details.previous_path) {
-    const addedHops = Array.isArray(details.added_hops) ? details.added_hops : [];
-    const removedHops = Array.isArray(details.removed_hops) ? details.removed_hops : [];
-    const renderPath = (hops, changedHops, direction) => {
-      if (!hops.length) return `<span class="path-hops-none">none</span>`;
-      const changedSet = new Set(changedHops);
-      return hops
-        .map((hop) => {
-          if (!changedSet.has(hop)) {
-            return `<span class="path-ip-neutral">${escapeHTML(hop)}</span>`;
-          }
-          return `<span class="path-ip path-ip-${direction}">${escapeHTML(hop)}</span>`;
-        })
-        .join('<span class="path-hop-arrow" aria-hidden="true"> &rarr; </span>');
-    };
-    const previous = renderPath(details.previous_path || [], removedHops, "removed");
-    const current = renderPath(details.current_path || [], addedHops, "added");
-    return `
-      <details class="alert-details">
-        <summary>Path change details</summary>
-        <div class="path-change-meta"><strong>Previous run:</strong> ${escapeHTML(details.previous_run_id ?? "-")} ${escapeHTML(details.previous_timestamp || "")}</div>
-        <div class="path-change-path"><strong>Previous path (${escapeHTML(details.previous_hop_count ?? 0)}):</strong> ${previous}</div>
-        <div class="path-change-path"><strong>Current path (${escapeHTML(details.current_hop_count ?? 0)}):</strong> ${current}</div>
-      </details>
-    `;
-  }
-
-  const metricRows = Object.entries(details)
-    .map(([key, value]) => {
-      const renderedValue = value !== null && typeof value === "object" ? JSON.stringify(value) : value;
-      return `<div><strong>${escapeHTML(key)}:</strong> ${escapeHTML(renderedValue)}</div>`;
-    })
-    .join("");
-  return `<details class="alert-details"><summary>Metric details</summary>${metricRows}</details>`;
+function alertIdFromLocation() {
+  const alertId = Number(new URLSearchParams(window.location.search).get("alert_id"));
+  return Number.isSafeInteger(alertId) && alertId > 0 ? alertId : null;
 }
 
-async function loadAlertHistory() {
+async function loadAlertHistory(focusAlertId = null) {
   const openAlertIds = new Set(
     [...alertsPageList.querySelectorAll(".alert-item")]
       .filter((row) => row.querySelector("details.alert-details")?.open)
@@ -85,6 +52,12 @@ async function loadAlertHistory() {
 
   const res = await fetch(`/api/alerts?limit=${encodeURIComponent(alertLimit.value)}`);
   const alerts = await res.json();
+  if (focusAlertId && !alerts.some((alert) => alert.id === focusAlertId)) {
+    const targetRes = await fetch(`/api/alerts?limit=1&alert_id=${encodeURIComponent(focusAlertId)}`);
+    const [targetAlert] = await targetRes.json();
+    if (targetAlert) alerts.push(targetAlert);
+  }
+  alerts.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
   if (!alerts.length) {
     alertsPageList.replaceChildren();
     const empty = document.createElement("div");
@@ -96,23 +69,38 @@ async function loadAlertHistory() {
   const fragment = document.createDocumentFragment();
   alerts.forEach((alert) => {
     const row = document.createElement("div");
-    row.className = `alert-item ${alert.severity}`;
+    const isFocusedAlert = alert.id === focusAlertId;
+    const presentation = window.PathScopeAlertDetails.presentAlert(alert);
+    row.className = `alert-item ${presentation.severityClass}${isFocusedAlert ? " alert-highlight" : ""}`;
     row.dataset.alertId = String(alert.id);
-    const detailsOpen = openAlertIds.has(String(alert.id));
+    row.id = `alert-${alert.id}`;
+    if (isFocusedAlert) row.tabIndex = -1;
+    const detailsOpen = isFocusedAlert || openAlertIds.has(String(alert.id));
+    const eventLink = alert.kind === "path_change" && alert.run_id
+      ? `<a class="alert-event-link" href="/events?event_id=${encodeURIComponent(alert.run_id)}">View event details</a>`
+      : "";
     row.innerHTML = `
       <div class="alert-row-main">
-        <strong>${escapeHTML(alert.kind)}</strong>
-        <span>${escapeHTML(alert.severity)}</span>
+        <strong>${escapeHTML(presentation.title)}</strong>
+        <span class="alert-severity alert-severity-${presentation.severityClass}">${escapeHTML(presentation.severityLabel)}</span>
         <span>${escapeHTML(alert.target)}</span>
         <small>${escapeHTML(fmtEastern(alert.timestamp))}</small>
       </div>
-      <div>${escapeHTML(alert.message)}</div>
-      <small>run_id: ${escapeHTML(alert.run_id ?? "-")}</small>
-      ${renderDetails(alert.details).replace("<details class=\"alert-details\">", `<details class="alert-details"${detailsOpen ? " open" : ""}>`)}
+      <p class="alert-summary">${escapeHTML(presentation.summary)}</p>
+      <small class="alert-meta">Check #${escapeHTML(alert.run_id ?? "-")}</small>
+      ${eventLink ? `<div class="alert-row-actions">${eventLink}</div>` : ""}
+      ${window.PathScopeAlertDetails.renderDetails(alert.details, alert.kind, detailsOpen)}
     `;
     fragment.appendChild(row);
   });
   alertsPageList.replaceChildren(fragment);
+  if (focusAlertId) {
+    const focusedAlert = document.getElementById(`alert-${focusAlertId}`);
+    if (focusedAlert) {
+      focusedAlert.scrollIntoView({ behavior: "smooth", block: "center" });
+      focusedAlert.focus({ preventScroll: true });
+    }
+  }
 }
 
 alertLimit.addEventListener("change", loadAlertHistory);
@@ -143,4 +131,4 @@ refreshAlertsBtn.addEventListener("click", async () => {
     refreshAlertsBtn.classList.remove("refreshing");
   }
 });
-loadAlertHistory();
+loadAlertHistory(alertIdFromLocation());

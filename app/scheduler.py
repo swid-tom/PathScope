@@ -13,7 +13,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from app.config import AppConfig, TargetConfig
 from app.db import AlertEvent, Hop, PortCheck, Run, SessionLocal
-from app.probes import dns_probe, endpoint_probe, geoip, mtr_probe, port_probe, tls_probe
+from app.probes import dns_probe, endpoint_probe, geoip, incident_context, mtr_probe, port_probe, tls_probe
 from app.queries import effective_path_hop
 
 log = logging.getLogger("pathscope.scheduler")
@@ -172,6 +172,10 @@ def probe_target(target: TargetConfig, cfg: AppConfig) -> None:
         ips, dns_ms, dns_err = dns_probe.resolve(target.host)
         resolved_ip = ips[0] if ips else None
         sinkhole_range = _sinkhole_range_for_ip(resolved_ip, cfg.dns_sinkhole_ranges) if resolved_ip else None
+        hubs = []
+        geo_map = {}
+        previous = None
+        service_checks = []
 
         run = Run(
             target=target.host,
@@ -186,6 +190,12 @@ def probe_target(target: TargetConfig, cfg: AppConfig) -> None:
         )
         session.add(run)
         session.flush()
+        prior_run = (
+            session.query(Run)
+            .filter(Run.target == target.host, Run.id != run.id)
+            .order_by(Run.timestamp.desc(), Run.id.desc())
+            .first()
+        )
 
         if resolved_ip:
             mtr_protocol = target.mtr_protocol or cfg.mtr_protocol
@@ -227,6 +237,8 @@ def probe_target(target: TargetConfig, cfg: AppConfig) -> None:
                             worst_ms=hub.get("Wrst"),
                             stdev_ms=hub.get("StDev"),
                             asn=geo.get("as"),
+                            asn_source=geo.get("asn_source"),
+                            bgp_prefix=geo.get("bgp_prefix"),
                             org=geo.get("org"),
                             country=geo.get("country"),
                             city=geo.get("city"),
@@ -258,11 +270,15 @@ def probe_target(target: TargetConfig, cfg: AppConfig) -> None:
 
             for tcp_port in target.tcp_ports:
                 ok, ms, err = port_probe.tcp_check(resolved_ip, tcp_port, timeout=cfg.port_timeout_seconds, tos=tos)
+                service_checks.append({"protocol": "tcp", "port": tcp_port, "success": ok, "error": err})
                 session.add(
                     PortCheck(run_id=run.id, protocol="tcp", port=tcp_port, success=ok, latency_ms=ms, error=err)
                 )
                 if cfg.tls_enabled:
                     tls_ok, tls_ms, tls_err = tls_probe.tls_check(target.host, resolved_ip, tcp_port, timeout=cfg.port_timeout_seconds, tos=tos)
+                    service_checks.append(
+                        {"protocol": "tls", "port": tcp_port, "success": tls_ok, "error": tls_err}
+                    )
                     session.add(
                         PortCheck(run_id=run.id, protocol="tls", port=tcp_port, success=tls_ok, latency_ms=tls_ms, error=tls_err)
                     )
@@ -276,6 +292,104 @@ def probe_target(target: TargetConfig, cfg: AppConfig) -> None:
                 )
 
             session.flush()
+
+        trigger_reasons = []
+        if not resolved_ip and (prior_run is None or prior_run.success):
+            trigger_reasons.append("dns_failure")
+        if resolved_ip and not run.success and (prior_run is None or prior_run.success):
+            trigger_reasons.append("mtr_failure")
+        if run.path_changed:
+            trigger_reasons.append("path_change")
+        previous_endpoint_failure = bool(
+            prior_run
+            and (
+                prior_run.endpoint_error
+                or (prior_run.endpoint_loss_pct is not None and prior_run.endpoint_loss_pct >= 100)
+            )
+        )
+        if (
+            run.endpoint_error or (run.endpoint_loss_pct is not None and run.endpoint_loss_pct >= 100)
+        ) and not previous_endpoint_failure:
+            trigger_reasons.append("endpoint_failure")
+        elif (
+            run.endpoint_loss_pct is not None
+            and run.endpoint_loss_pct > 0
+            and not (prior_run and prior_run.endpoint_loss_pct and prior_run.endpoint_loss_pct > 0)
+        ):
+            trigger_reasons.append("endpoint_loss")
+        current_failed_services = {
+            (check["protocol"], check["port"])
+            for check in service_checks
+            if not check["success"]
+        }
+        previous_failed_services = {
+            (check.protocol, check.port)
+            for check in (prior_run.port_checks if prior_run else [])
+            if not check.success
+        }
+        if current_failed_services - previous_failed_services:
+            trigger_reasons.append("service_failure")
+
+        if trigger_reasons:
+            if cfg.geoip_enabled and resolved_ip and resolved_ip not in geo_map:
+                geo_map.update(geoip.lookup_batch([resolved_ip], cfg.geoip_cache_ttl_seconds))
+
+            def route_snapshot(route_hubs, metadata):
+                return [
+                    {
+                        "hop": item.get("count"),
+                        "host": item.get("host") or "???",
+                        "asn": metadata.get(item.get("host") or "", {}).get("as"),
+                        "bgp_prefix": metadata.get(item.get("host") or "", {}).get("bgp_prefix"),
+                    }
+                    for item in route_hubs
+                ]
+
+            current_route = route_snapshot(hubs, geo_map)
+            previous_route = []
+            if previous is not None:
+                previous_route = [
+                    {
+                        "hop": hop.hop_num,
+                        "host": hop.host,
+                        "asn": hop.asn,
+                        "bgp_prefix": hop.bgp_prefix,
+                    }
+                    for hop in sorted(previous.hops, key=lambda item: item.hop_num or 0)
+                ]
+
+            target_metadata = geo_map.get(resolved_ip, {}) if resolved_ip else {}
+            prefix = (target_metadata.get("bgp_prefix") or "").split(",")[0].strip() or None
+            origin_asns = [
+                asn.strip()
+                for asn in (target_metadata.get("as") or "").split(",")
+                if asn.strip()
+            ]
+            local = {
+                "target": target.host,
+                "resolved_ip": resolved_ip,
+                "path_changed": bool(run.path_changed),
+                "path_signature": run.path_signature,
+                "previous_path": previous_route,
+                "current_path": current_route,
+                "mtr_success": bool(run.success),
+                "mtr_error": run.error,
+                "endpoint_protocol": run.endpoint_probe_protocol,
+                "endpoint_avg_ms": run.endpoint_avg_ms,
+                "endpoint_loss_pct": run.endpoint_loss_pct,
+                "endpoint_error": run.endpoint_error,
+                "service_checks": service_checks,
+            }
+            context = incident_context.collect_incident_context(
+                event_time=run.timestamp,
+                trigger_reasons=trigger_reasons,
+                local=local,
+                prefix=prefix,
+                origin_asns=origin_asns,
+                status_page_url=target.status_page_url,
+            )
+            run.incident_context_json = json.dumps(context, separators=(",", ":"))
+
         _evaluate_alerts(session, cfg, target, run)
         session.commit()
     except Exception:

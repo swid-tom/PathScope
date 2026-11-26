@@ -26,6 +26,7 @@ class TargetConfig:
     endpoint_probe_count: int | None = None
     endpoint_probe_port: int | None = None
     dscp: int | None = None
+    status_page_url: str | None = None
 
 
 @dataclass
@@ -81,6 +82,7 @@ def load_config(path: str = CONFIG_PATH) -> AppConfig:
             endpoint_probe_count=t.get("endpoint_probe_count"),
             endpoint_probe_port=t.get("endpoint_probe_port"),
             dscp=t.get("dscp"),
+            status_page_url=t.get("status_page_url"),
         )
         for t in raw.get("targets", [])
     ]

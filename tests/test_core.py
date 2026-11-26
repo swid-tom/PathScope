@@ -18,7 +18,7 @@ import yaml
 from app.config import TargetConfig, load_config
 from app.config_store import update_config_file, update_config_section
 from app.db import AlertEvent, Base, Hop, PortCheck, Run
-from app import main
+from app import db, main
 from app.main import _sample_chart_runs, _time_range
 from app.queries import (
     classify_status,
@@ -49,6 +49,36 @@ class CoreBehaviorTests(unittest.TestCase):
         self.session.add(run)
         self.session.flush()
         return run
+
+    def test_init_db_migrates_bgp_fields_on_an_existing_database(self):
+        legacy_engine = create_engine("sqlite:///:memory:")
+        try:
+            with legacy_engine.begin() as connection:
+                connection.exec_driver_sql(
+                    "CREATE TABLE runs (id INTEGER PRIMARY KEY, target VARCHAR, timestamp DATETIME)"
+                )
+                connection.exec_driver_sql(
+                    "CREATE TABLE hops (id INTEGER PRIMARY KEY, run_id INTEGER, asn VARCHAR)"
+                )
+                connection.exec_driver_sql(
+                    "CREATE TABLE alert_events (id INTEGER PRIMARY KEY, target VARCHAR, timestamp DATETIME)"
+                )
+
+            with patch.object(db, "engine", legacy_engine):
+                db.init_db()
+
+            with legacy_engine.connect() as connection:
+                hop_columns = {
+                    row[1] for row in connection.exec_driver_sql("PRAGMA table_info(hops)").fetchall()
+                }
+                run_columns = {
+                    row[1] for row in connection.exec_driver_sql("PRAGMA table_info(runs)").fetchall()
+                }
+            self.assertIn("asn_source", hop_columns)
+            self.assertIn("bgp_prefix", hop_columns)
+            self.assertIn("incident_context_json", run_columns)
+        finally:
+            legacy_engine.dispose()
 
     def test_effective_hops_are_loaded_in_bulk_and_ignore_unresponsive_hops(self):
         first = self.add_run()
@@ -125,6 +155,10 @@ class CoreBehaviorTests(unittest.TestCase):
         self.assertEqual(result, newer_change.timestamp)
         self.assertNotEqual(result, older_change.timestamp)
         self.assertNotEqual(result, newer_no_change.timestamp)
+        self.assertEqual(
+            last_path_change(self.session, "monitor.example", at=dt.datetime(2026, 1, 1, 12)),
+            older_change.timestamp,
+        )
         self.assertIsNone(last_path_change(self.session, "never-seen.example"))
 
     def test_api_status_uses_endpoint_probe_when_no_service_ports_are_configured(self):
@@ -196,6 +230,90 @@ class CoreBehaviorTests(unittest.TestCase):
             {"latency_ms": 100, "jitter_ms": 40, "loss_pct": 3},
         )
 
+    def test_api_latest_returns_the_latest_snapshot_at_or_before_requested_time(self):
+        earlier = self.add_run(
+            timestamp=dt.datetime(2026, 1, 1),
+            endpoint_avg_ms=12,
+            path_changed=True,
+        )
+        later = self.add_run(
+            timestamp=dt.datetime(2026, 1, 2),
+            endpoint_avg_ms=99,
+        )
+        self.session.add_all(
+            [
+                Hop(run_id=earlier.id, hop_num=1, host="192.0.2.1", avg_ms=10, loss_pct=0, stdev_ms=1),
+                Hop(run_id=later.id, hop_num=1, host="192.0.2.2", avg_ms=90, loss_pct=0, stdev_ms=2),
+            ]
+        )
+        self.session.commit()
+        target = TargetConfig(
+            host=earlier.target,
+            label=earlier.target,
+            alert_latency_ms=100,
+            alert_jitter_ms=40,
+            alert_loss_pct=3,
+        )
+        session_factory = sessionmaker(bind=self.engine, expire_on_commit=False)
+
+        with (
+            patch.object(main, "SessionLocal", session_factory),
+            patch.object(main.cfg, "targets", [target]),
+            patch.object(main.cfg, "alert_latency_ms", 200),
+            patch.object(main.cfg, "alert_jitter_ms", 40),
+            patch.object(main.cfg, "alert_loss_pct", 5),
+            patch.object(main, "baseline_for_target", return_value={"latency_ms": None, "jitter_ms": None}),
+            patch.object(main, "last_path_change", return_value=earlier.timestamp),
+        ):
+            result = main.api_latest(at="2026-01-01T12:00:00Z", _auth=None)
+
+        self.assertEqual(result[0]["timestamp"], "2026-01-01T00:00:00Z")
+        self.assertEqual(result[0]["endpoint_avg_ms"], 12)
+        self.assertEqual(result[0]["dest_avg_ms"], 10)
+
+    def test_tier1_provider_lookup_requires_an_exact_asn_match(self):
+        self.assertEqual(main._tier1_provider_for_asn("AS174 Cogent Communications"), "Cogent Communications")
+        self.assertEqual(main._tier1_provider_for_asn("as1299 Arelion"), "Arelion")
+        self.assertEqual(main._tier1_provider_for_asn("AS6453, AS174"), "Tata Communications")
+        self.assertIsNone(main._tier1_provider_for_asn("AS1740 Example ISP"))
+        self.assertIsNone(main._tier1_provider_for_asn("Example ISP AS174"))
+        self.assertIsNone(main._tier1_provider_for_asn(None))
+
+    def test_hop_network_classification_marks_tier1_private_cgnat_and_unknown_hops(self):
+        run = self.add_run()
+        self.session.add_all(
+            [
+                Hop(
+                    run_id=run.id,
+                    hop_num=1,
+                    host="8.8.8.8",
+                    asn="AS174",
+                    asn_source="Team Cymru",
+                    bgp_prefix="8.8.8.0/24",
+                ),
+                Hop(run_id=run.id, hop_num=2, host="192.168.1.1"),
+                Hop(run_id=run.id, hop_num=3, host="100.64.0.1"),
+                Hop(run_id=run.id, hop_num=4, host="???"),
+            ]
+        )
+        self.session.commit()
+        session_factory = sessionmaker(bind=self.engine, expire_on_commit=False)
+
+        with patch.object(main, "SessionLocal", session_factory):
+            results = main.api_run_hops(run.id, _auth=None)
+
+        self.assertEqual(
+            [(hop["network_class"], hop["network_type"]) for hop in results],
+            [
+                ("tier1", "Tier 1 ISP — Cogent Communications"),
+                ("private", "Private network"),
+                ("cgnat", "CGNAT / shared address"),
+                ("no-response", "No response"),
+            ],
+        )
+        self.assertEqual(results[0]["asn_source"], "Team Cymru")
+        self.assertEqual(results[0]["bgp_prefix"], "8.8.8.0/24")
+
     def test_time_range_rejects_bad_windows_and_custom_dates(self):
         for window, start, end in (
             ("invalid", None, None),
@@ -240,6 +358,8 @@ class CoreBehaviorTests(unittest.TestCase):
             "/api/status",
             "/api/latest",
             "/api/alerts",
+            "/api/alerts/count",
+            "/api/events",
             "/api/summary",
             "/api/runs",
             "/api/runs/{run_id}/hops",
@@ -448,6 +568,51 @@ class CoreBehaviorTests(unittest.TestCase):
             for event in self.session.query(AlertEvent).order_by(AlertEvent.id.asc()).all()
         ]
         self.assertEqual(kinds, ["probe_failure", "probe_recovery"])
+
+    def test_alert_count_only_counts_events_in_the_recent_window(self):
+        now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+        self.session.add_all(
+            [
+                AlertEvent(
+                    target="monitor.example",
+                    timestamp=now - dt.timedelta(minutes=10),
+                    severity="warning",
+                    kind="latency",
+                    message="Recent alert",
+                ),
+                AlertEvent(
+                    target="monitor.example",
+                    timestamp=now - dt.timedelta(minutes=45),
+                    severity="critical",
+                    kind="loss",
+                    message="Older alert",
+                ),
+            ]
+        )
+        self.session.commit()
+        session_factory = sessionmaker(bind=self.engine, expire_on_commit=False)
+
+        with patch.object(main, "SessionLocal", session_factory):
+            result = main.api_alert_count(recent_minutes=30, _auth=None)
+
+        self.assertEqual(result, {"count": 1})
+
+    def test_alert_history_can_fetch_a_specific_event_by_id(self):
+        target = AlertEvent(
+            target="monitor.example",
+            timestamp=dt.datetime(2026, 1, 1),
+            severity="warning",
+            kind="latency",
+            message="Alert to find",
+        )
+        self.session.add(target)
+        self.session.commit()
+        session_factory = sessionmaker(bind=self.engine, expire_on_commit=False)
+
+        with patch.object(main, "SessionLocal", session_factory):
+            result = main.api_alerts(limit=1, recent_minutes=None, alert_id=target.id, _auth=None)
+
+        self.assertEqual([alert["id"] for alert in result], [target.id])
 
 
 if __name__ == "__main__":

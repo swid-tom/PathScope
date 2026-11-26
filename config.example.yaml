@@ -11,6 +11,7 @@ targets:
     endpoint_probe_enabled: true
     endpoint_probe_protocol: tcp
     endpoint_probe_count: 5
+    status_page_url: null
 
 mtr:
   count: 5

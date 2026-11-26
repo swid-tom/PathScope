@@ -4,6 +4,10 @@ const customWindowControls = document.getElementById("customWindowControls");
 const customStart = document.getElementById("customStart");
 const customEnd = document.getElementById("customEnd");
 const applyCustomWindow = document.getElementById("applyCustomWindow");
+const resetChartZoomBtn = document.getElementById("resetChartZoomBtn");
+const historicalSnapshotNotice = document.getElementById("historicalSnapshotNotice");
+const historicalSnapshotTime = document.getElementById("historicalSnapshotTime");
+const returnLiveSnapshotBtn = document.getElementById("returnLiveSnapshotBtn");
 const exportBtn = document.getElementById("exportBtn");
 const helpBtn = document.getElementById("helpBtn");
 const closeHelpBtn = document.getElementById("closeHelpBtn");
@@ -13,12 +17,23 @@ const showUnknownHops = document.getElementById("showUnknownHops");
 const statusCards = document.getElementById("statusCards");
 const alertsList = document.getElementById("alertsList");
 const toggleAlertsBtn = document.getElementById("toggleAlertsBtn");
+const recentAlertCount = document.getElementById("recentAlertCount");
+const incidentContext = document.getElementById("incidentContext");
 const pathViz = document.getElementById("pathViz");
 const pathHoverDetails = document.getElementById("pathHoverDetails");
+const unknownHopsStatus = document.getElementById("unknownHopsStatus");
 const hopsTableBody = document.querySelector("#hopsTable tbody");
 
 let latencyChart, hopCountChart;
+let chartPoints = [];
+let chartSelection = null;
+let chartCursorTimestamp = null;
+let chartCursorDrag = null;
+let chartZoomReturnRange = null;
 let recentAlerts = [];
+let latestHopRecords = [];
+let latestHopRunTimestamp = null;
+const expandedRecentAlertIds = new Set();
 let alertsMinimized = false;
 let draggedTarget = null;
 let cardDragMoved = false;
@@ -33,6 +48,18 @@ const chartSeriesVariables = [
   "--series-endpoint-loss",
   "--series-hops",
 ];
+const networkMarkerClasses = new Set([
+  "tier1",
+  "private",
+  "cgnat",
+  "loopback",
+  "link-local",
+  "multicast",
+  "public",
+  "reserved",
+  "no-response",
+  "unknown",
+]);
 
 function themeColor(variable, fallback) {
   return getComputedStyle(document.documentElement).getPropertyValue(variable).trim() || fallback;
@@ -169,6 +196,210 @@ function updateCustomWindowVisibility() {
   customWindowControls.classList.toggle("hidden", windowSelect.value !== "custom");
 }
 
+function dateToLocalInputValue(date) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function chartPointerX(chart, event) {
+  const rect = chart.canvas.getBoundingClientRect();
+  return (event.clientX - rect.left) * (chart.width / rect.width);
+}
+
+function chartIndexAtX(chart, x) {
+  const value = chart.scales.x.getValueForPixel(x);
+  if (!Number.isFinite(value) || !chartPoints.length) return null;
+  return Math.max(0, Math.min(chartPoints.length - 1, Math.round(value)));
+}
+
+function chartCursorX(chart) {
+  if (chartCursorTimestamp === null || !chartPoints.length) return null;
+  const exactIndex = chartPoints.indexOf(chartCursorTimestamp);
+  if (exactIndex >= 0) return chart.scales.x.getPixelForValue(exactIndex);
+  const rightIndex = chartPoints.findIndex((timestamp) => timestamp > chartCursorTimestamp);
+  if (rightIndex <= 0) return chart.scales.x.getPixelForValue(0);
+  if (rightIndex < 0) return chart.scales.x.getPixelForValue(chartPoints.length - 1);
+  const leftIndex = rightIndex - 1;
+  const fraction = (chartCursorTimestamp - chartPoints[leftIndex]) / (chartPoints[rightIndex] - chartPoints[leftIndex]);
+  const leftX = chart.scales.x.getPixelForValue(leftIndex);
+  const rightX = chart.scales.x.getPixelForValue(rightIndex);
+  return leftX + (rightX - leftX) * fraction;
+}
+
+function updateHistoricalSnapshotNotice() {
+  const hasSnapshot = chartCursorTimestamp !== null;
+  historicalSnapshotNotice.classList.toggle("hidden", !hasSnapshot);
+  if (hasSnapshot) {
+    historicalSnapshotTime.textContent = fmtEastern(new Date(chartCursorTimestamp).toISOString());
+  }
+}
+
+function clearChartCursor() {
+  chartCursorTimestamp = null;
+  chartCursorDrag = null;
+  updateHistoricalSnapshotNotice();
+  latencyChart?.draw();
+}
+
+const chartRangeSelectionPlugin = {
+  id: "chartRangeSelection",
+  afterDraw(chart) {
+    const { left, right, top, bottom } = chart.chartArea;
+    const context = chart.ctx;
+    context.save();
+    if (chartSelection) {
+      const x1 = Math.max(left, Math.min(right, chartSelection.startX));
+      const x2 = Math.max(left, Math.min(right, chartSelection.endX));
+      context.fillStyle = themeColor("--focus-ring", "rgba(65, 190, 222, 0.42)");
+      context.strokeStyle = themeColor("--accent", "#62c6e2");
+      context.lineWidth = 1;
+      context.fillRect(Math.min(x1, x2), top, Math.abs(x2 - x1), bottom - top);
+      context.strokeRect(Math.min(x1, x2), top, Math.abs(x2 - x1), bottom - top);
+    }
+    if (chartCursorTimestamp !== null) {
+      const x = chartCursorX(chart);
+      if (x !== null) {
+        context.strokeStyle = themeColor("--accent", "#62c6e2");
+        context.fillStyle = themeColor("--accent", "#62c6e2");
+        context.lineWidth = 2;
+        context.setLineDash([5, 4]);
+        context.beginPath();
+        context.moveTo(x, top);
+        context.lineTo(x, bottom);
+        context.stroke();
+        context.setLineDash([]);
+        context.beginPath();
+        context.arc(x, top + 5, 5, 0, Math.PI * 2);
+        context.fill();
+      }
+    }
+    context.restore();
+  },
+};
+
+function bindChartRangeSelection(chart) {
+  const canvas = chart.canvas;
+  canvas.addEventListener("pointerdown", (event) => {
+    const { left, right, top, bottom } = chart.chartArea;
+    const x = chartPointerX(chart, event);
+    const rect = canvas.getBoundingClientRect();
+    const y = (event.clientY - rect.top) * (chart.height / rect.height);
+    if (event.button !== 0 || chartPoints.length < 2 || x < left || x > right || y < top || y > bottom) return;
+
+    if (chartCursorTimestamp !== null) {
+      const cursorX = chartCursorX(chart);
+      if (cursorX !== null && Math.abs(x - cursorX) <= 10) {
+        chartCursorDrag = { pointerId: event.pointerId, originalTimestamp: chartCursorTimestamp };
+        canvas.setPointerCapture(event.pointerId);
+        event.preventDefault();
+        return;
+      }
+    }
+
+    chartSelection = { pointerId: event.pointerId, startX: x, endX: x };
+    canvas.setPointerCapture(event.pointerId);
+    event.preventDefault();
+    chart.draw();
+  });
+  canvas.addEventListener("pointermove", (event) => {
+    if (chartCursorDrag?.pointerId === event.pointerId) {
+      const { left, right } = chart.chartArea;
+      const index = chartIndexAtX(chart, Math.max(left, Math.min(right, chartPointerX(chart, event))));
+      if (index !== null) {
+        chartCursorTimestamp = chartPoints[index];
+        updateHistoricalSnapshotNotice();
+        chart.draw();
+      }
+      return;
+    }
+    if (!chartSelection && chartCursorTimestamp !== null) {
+      const { left, right, top, bottom } = chart.chartArea;
+      const x = chartPointerX(chart, event);
+      const rect = canvas.getBoundingClientRect();
+      const y = (event.clientY - rect.top) * (chart.height / rect.height);
+      const cursorX = chartCursorX(chart);
+      canvas.style.cursor = x >= left && x <= right && y >= top && y <= bottom && cursorX !== null && Math.abs(x - cursorX) <= 10
+        ? "ew-resize"
+        : "crosshair";
+    }
+    if (!chartSelection || chartSelection.pointerId !== event.pointerId) return;
+    const { left, right } = chart.chartArea;
+    chartSelection.endX = Math.max(left, Math.min(right, chartPointerX(chart, event)));
+    chart.draw();
+  });
+  canvas.addEventListener("pointerup", (event) => {
+    if (chartCursorDrag?.pointerId === event.pointerId) {
+      chartCursorDrag = null;
+      canvas.style.cursor = "crosshair";
+      loadStatusCards(chartCursorTimestamp);
+      return;
+    }
+    if (!chartSelection || chartSelection.pointerId !== event.pointerId) return;
+    const selection = chartSelection;
+    chartSelection = null;
+    chart.draw();
+    const xScale = chart.scales.x;
+    const leftIndex = xScale.getValueForPixel(Math.min(selection.startX, selection.endX));
+    const rightIndex = xScale.getValueForPixel(Math.max(selection.startX, selection.endX));
+    if (!Number.isFinite(leftIndex) || !Number.isFinite(rightIndex)) return;
+    const startIndex = Math.max(0, Math.floor(leftIndex));
+    const endIndex = Math.min(chartPoints.length - 1, Math.ceil(rightIndex));
+    if (endIndex <= startIndex || Math.abs(selection.endX - selection.startX) < 8) return;
+    const cursorIndex = chartIndexAtX(chart, selection.endX);
+    applyChartTimeRange(
+      chartPoints[startIndex],
+      chartPoints[endIndex],
+      cursorIndex === null ? chartPoints[endIndex] : chartPoints[cursorIndex]
+    );
+  });
+  canvas.addEventListener("pointercancel", (event) => {
+    if (chartCursorDrag?.pointerId === event.pointerId) {
+      chartCursorTimestamp = chartCursorDrag.originalTimestamp;
+      chartCursorDrag = null;
+      updateHistoricalSnapshotNotice();
+      chart.draw();
+    }
+    chartSelection = null;
+    chart.draw();
+  });
+}
+
+async function applyChartTimeRange(startTimestamp, endTimestamp, cursorTimestamp) {
+  chartCursorTimestamp = cursorTimestamp;
+  updateHistoricalSnapshotNotice();
+  if (!chartZoomReturnRange) {
+    chartZoomReturnRange = {
+      window: windowSelect.value,
+      start: customStart.value,
+      end: customEnd.value,
+    };
+  }
+  const start = new Date(Math.floor(startTimestamp / 1000) * 1000);
+  const end = new Date(Math.ceil(endTimestamp / 1000) * 1000);
+  customStart.value = dateToLocalInputValue(start);
+  customEnd.value = dateToLocalInputValue(end);
+  windowSelect.value = "custom";
+  updateCustomWindowVisibility();
+  resetChartZoomBtn.classList.remove("hidden");
+  await refreshAll();
+}
+
+function clearChartZoomReturnRange() {
+  chartZoomReturnRange = null;
+  resetChartZoomBtn.classList.add("hidden");
+}
+
+async function resetChartZoom() {
+  if (!chartZoomReturnRange) return;
+  clearChartCursor();
+  windowSelect.value = chartZoomReturnRange.window;
+  customStart.value = chartZoomReturnRange.start;
+  customEnd.value = chartZoomReturnRange.end;
+  clearChartZoomReturnRange();
+  updateCustomWindowVisibility();
+  await refreshAll();
+}
+
 function drawFallbackChart(canvas, labels, series) {
   const ratio = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
@@ -231,8 +462,11 @@ function drawFallbackChart(canvas, labels, series) {
   });
 }
 
-async function loadStatusCards() {
-  const res = await fetch("/api/latest");
+async function loadStatusCards(asOfTimestamp = null) {
+  const url = asOfTimestamp === null
+    ? "/api/latest"
+    : `/api/latest?at=${encodeURIComponent(new Date(asOfTimestamp).toISOString())}`;
+  const res = await fetch(url);
   const data = applySavedCardOrder(await res.json());
   const fragment = document.createDocumentFragment();
   data.forEach((t) => {
@@ -347,14 +581,25 @@ async function loadStatusCards() {
 }
 
 async function loadAlerts() {
-  const res = await fetch("/api/alerts?limit=5&recent_minutes=30");
-  recentAlerts = await res.json();
-  renderRecentAlert();
+  const [alertsResponse, countResponse] = await Promise.all([
+    fetch("/api/alerts?limit=5&recent_minutes=30"),
+    fetch("/api/alerts/count?recent_minutes=30"),
+  ]);
+  recentAlerts = await alertsResponse.json();
+  const visibleAlertIds = new Set(recentAlerts.map((alert) => String(alert.id)));
+  expandedRecentAlertIds.forEach((alertId) => {
+    if (!visibleAlertIds.has(alertId)) expandedRecentAlertIds.delete(alertId);
+  });
+  const { count } = await countResponse.json();
+  recentAlertCount.textContent = String(count);
+  recentAlertCount.setAttribute("aria-label", `${count} alerts in the last 30 minutes`);
+  renderRecentAlerts();
 }
 
-function renderRecentAlert() {
+function renderRecentAlerts() {
   alertsList.classList.toggle("minimized", alertsMinimized);
   toggleAlertsBtn.textContent = alertsMinimized ? "Show" : "Minimize";
+  toggleAlertsBtn.setAttribute("aria-expanded", String(!alertsMinimized));
   if (alertsMinimized) {
     alertsList.replaceChildren();
     return;
@@ -367,14 +612,41 @@ function renderRecentAlert() {
 
   const fragment = document.createDocumentFragment();
   recentAlerts.forEach((alert, index) => {
-    const div = document.createElement("div");
-    div.className = `alert-item ${alert.severity}`;
-    div.innerHTML = `
-      <div><strong>${index + 1}. ${escapeHTML(alert.kind)}</strong> <span>${escapeHTML(alert.target)}</span></div>
-      <div>${escapeHTML(alert.message)}</div>
-      <small>${escapeHTML(fmtEastern(alert.timestamp))}</small>
+    const alertId = String(alert.id);
+    const detailsExpanded = expandedRecentAlertIds.has(alertId);
+    const item = document.createElement("div");
+    const presentation = window.PathScopeAlertDetails.presentAlert(alert);
+    item.className = `alert-item recent-alert-item ${presentation.severityClass}${detailsExpanded ? " details-open" : ""}`;
+    item.innerHTML = `
+      <div class="recent-alert-content">
+        <div class="recent-alert-heading">
+          <strong>${index + 1}. ${escapeHTML(presentation.title)}</strong>
+          <span>${escapeHTML(alert.target)}</span>
+          <span class="alert-severity alert-severity-${presentation.severityClass}">${escapeHTML(presentation.severityLabel)}</span>
+        </div>
+        <p class="alert-summary">${escapeHTML(presentation.summary)}</p>
+        <small>${escapeHTML(fmtEastern(alert.timestamp))}</small>
+        <div id="recent-alert-details-${escapeHTML(alertId)}" class="recent-alert-details${detailsExpanded ? "" : " hidden"}">
+          ${window.PathScopeAlertDetails.renderContent(alert.details, alert.kind)}
+        </div>
+      </div>
+      <div class="recent-alert-overlay">
+        <a class="recent-alert-action" href="/alerts?alert_id=${encodeURIComponent(alert.id)}">View alert</a>
+        ${alert.kind === "path_change" && alert.run_id ? `<a class="recent-alert-action" href="/events?event_id=${encodeURIComponent(alert.run_id)}">View event</a>` : ""}
+        <button class="recent-alert-action recent-alert-details-toggle" type="button" aria-expanded="${detailsExpanded}" aria-controls="recent-alert-details-${escapeHTML(alertId)}">${detailsExpanded ? "Hide details" : "Details"}</button>
+      </div>
     `;
-    fragment.appendChild(div);
+    item.querySelector(".recent-alert-details-toggle").addEventListener("click", (event) => {
+      const isExpanded = event.currentTarget.getAttribute("aria-expanded") === "true";
+      const nextExpanded = !isExpanded;
+      item.classList.toggle("details-open", nextExpanded);
+      item.querySelector(".recent-alert-details").classList.toggle("hidden", !nextExpanded);
+      event.currentTarget.setAttribute("aria-expanded", String(nextExpanded));
+      event.currentTarget.textContent = nextExpanded ? "Hide details" : "Details";
+      if (nextExpanded) expandedRecentAlertIds.add(alertId);
+      else expandedRecentAlertIds.delete(alertId);
+    });
+    fragment.appendChild(item);
   });
   alertsList.replaceChildren(fragment);
 }
@@ -404,6 +676,7 @@ async function loadCharts() {
   const res = await fetch(`/api/summary?${params.toString()}`);
   const points = await res.json();
 
+  chartPoints = points.map((point) => new Date(point.timestamp).getTime());
   const labels = points.map((p) => fmtEastern(p.timestamp, false));
   const avgMs = points.map((p) => p.avg_ms);
   const jitterMs = points.map((p) => p.jitter_ms);
@@ -437,6 +710,7 @@ async function loadCharts() {
   } else {
   latencyChart = new Chart(document.getElementById("latencyChart"), {
     type: "line",
+    plugins: [chartRangeSelectionPlugin],
     data: {
       labels,
       datasets: [
@@ -486,6 +760,7 @@ async function loadCharts() {
       },
     },
   });
+  bindChartRangeSelection(latencyChart);
   }
 
   if (hopCountChart) {
@@ -527,8 +802,10 @@ async function loadCharts() {
 async function loadLatestHops() {
   const target = targetSelect.value;
   if (!target) {
-    hopsTableBody.replaceChildren();
-    renderPathViz([]);
+    latestHopRecords = [];
+    latestHopRunTimestamp = null;
+    renderRecentEvents([]);
+    renderLatestHops();
     return;
   }
   const params = rangeParams();
@@ -537,23 +814,78 @@ async function loadLatestHops() {
   const runsRes = await fetch(`/api/runs?${params.toString()}`);
   const runs = await runsRes.json();
   if (!runs.length) {
-    hopsTableBody.replaceChildren();
-    renderPathViz([]);
+    latestHopRecords = [];
+    latestHopRunTimestamp = null;
+    renderRecentEvents([]);
+    renderLatestHops();
     return;
   }
 
+  const eventParams = rangeParams();
+  eventParams.set("target", target);
+  eventParams.set("limit", "4");
+  try {
+    const eventsRes = await fetch(`/api/events?${eventParams.toString()}`);
+    if (!eventsRes.ok) throw new Error(`HTTP ${eventsRes.status}`);
+    renderRecentEvents(await eventsRes.json());
+  } catch {
+    if (!incidentContext.querySelector(".event-load-error")) {
+      const error = document.createElement("p");
+      error.className = "event-load-error";
+      incidentContext.appendChild(error);
+    }
+    incidentContext.querySelector(".event-load-error").textContent =
+      "Could not load event summaries. Check API access and refresh.";
+  }
   const hopsRes = await fetch(`/api/runs/${runs[0].id}/hops`);
-  const hops = await hopsRes.json();
-  const visibleHops = showUnknownHops.checked ? hops : hops.filter((h) => h.host !== "???");
+  latestHopRecords = await hopsRes.json();
+  latestHopRunTimestamp = fmtEastern(runs[0].timestamp);
+  renderLatestHops();
+}
+
+function renderRecentEvents(events) {
+  const fragment = document.createDocumentFragment();
+  if (!events.length) {
+    const empty = document.createElement("p");
+    empty.className = "event-empty";
+    empty.textContent = "No path changes or probe incidents in the selected window.";
+    fragment.appendChild(empty);
+  } else {
+    events.slice(0, 4).forEach((event) => {
+      fragment.appendChild(window.PathScopeIncidentContext.createEventCard(event));
+    });
+  }
+  incidentContext.replaceChildren(fragment);
+}
+
+function isUnknownHop(hop) {
+  return !hop.host || String(hop.host).trim() === "???";
+}
+
+function renderNetworkMarker(hop) {
+  const networkClass = networkMarkerClasses.has(hop.network_class) ? hop.network_class : "unknown";
+  return `<span class="network-marker ${networkClass}">${escapeHTML(hop.network_type || "Network unknown")}</span>`;
+}
+
+function renderLatestHops() {
+  const visibleHops = showUnknownHops.checked ? latestHopRecords : latestHopRecords.filter((hop) => !isUnknownHop(hop));
+  const hasUnknownHops = latestHopRecords.some(isUnknownHop);
+  const noUnknownMessage = showUnknownHops.checked && !hasUnknownHops
+    ? latestHopRunTimestamp
+      ? "No unresponsive hops were reported in this run."
+      : "No path run is available in this time window."
+    : "";
+  unknownHopsStatus.textContent = noUnknownMessage;
+  unknownHopsStatus.classList.toggle("hidden", !noUnknownMessage);
   renderPathViz(visibleHops);
   const rows = document.createDocumentFragment();
   visibleHops.forEach((h) => {
     const tr = document.createElement("tr");
     if (h.loss_pct > 0) tr.className = "loss";
     tr.innerHTML = `
-      <td>${escapeHTML(h.hop_num)}</td><td>${escapeHTML(h.host)}</td><td>${fmt(h.loss_pct)}</td><td>${escapeHTML(h.sent ?? "-")}</td>
+      <td>${escapeHTML(h.hop_num)}</td><td>${escapeHTML(latestHopRunTimestamp || "-")}</td><td>${renderNetworkMarker(h)}</td><td>${escapeHTML(h.host || "???")}</td><td>${fmt(h.loss_pct)}</td><td>${escapeHTML(h.sent ?? "-")}</td>
       <td>${fmt(h.last_ms)}</td><td>${fmt(h.avg_ms)}</td><td>${fmt(h.best_ms)}</td><td>${fmt(h.worst_ms)}</td><td>${fmt(h.stdev_ms)}</td>
-      <td>${escapeHTML(h.asn || "-")}</td><td>${escapeHTML(h.org || "-")}</td><td>${escapeHTML(h.country || "-")}</td><td>${escapeHTML(h.city || "-")}</td>
+      <td title="${escapeHTML(h.asn_source ? `Source: ${h.asn_source}` : "ASN source unavailable")}">${escapeHTML(h.asn || "-")}</td><td>${escapeHTML(h.org || "-")}</td><td>${escapeHTML(h.bgp_prefix || "-")}</td><td>${escapeHTML(h.country || "-")}</td><td>${escapeHTML(h.city || "-")}</td>
     `;
     rows.appendChild(tr);
   });
@@ -637,14 +969,14 @@ function renderPathViz(hops) {
     const role = index === 0 ? "Client" : index === hops.length - 1 ? "Target" : `H${hop.hop_num}`;
     const avg = `${fmt(hop.avg_ms, 0)} ms`;
 
-    const details = `Hop ${hop.hop_num}: ${hop.host} | avg ${fmt(hop.avg_ms)} ms | loss ${fmt(hop.loss_pct)}% | ${hop.asn || "ASN unknown"} | ${hop.org || "Org unknown"}`;
+    const networkDetail = hop.network_type ? ` | ${hop.network_type}` : "";
+    const prefixDetail = hop.bgp_prefix ? ` | BGP prefix ${hop.bgp_prefix}` : "";
+    const details = `Hop ${hop.hop_num}: ${hop.host} | avg ${fmt(hop.avg_ms)} ms | loss ${fmt(hop.loss_pct)}% | ${hop.asn || "ASN unknown"} | ${hop.org || "Org unknown"}${prefixDetail}${networkDetail}`;
     card.title = details;
     card.addEventListener("mouseenter", () => { pathHoverDetails.textContent = details; });
     card.addEventListener("focus", () => { pathHoverDetails.textContent = details; });
 
-    card.innerHTML = `
-      <span class="path-badge">${escapeHTML(role)}</span>
-    `;
+    card.innerHTML = `<span class="path-badge">${escapeHTML(role)}</span>`;
 
     item.appendChild(card);
 
@@ -669,7 +1001,7 @@ async function refreshAll() {
   if (refreshInFlight) return;
   refreshInFlight = true;
   try {
-    await Promise.allSettled([loadStatusCards(), loadAlerts(), loadCharts(), loadLatestHops()]);
+    await Promise.allSettled([loadStatusCards(chartCursorTimestamp), loadAlerts(), loadCharts(), loadLatestHops()]);
   } finally {
     refreshInFlight = false;
   }
@@ -680,7 +1012,7 @@ async function init() {
   await refreshAll();
   setInterval(() => {
     // Skip background refreshes while hidden or mid-drag so they don't disrupt the user.
-    if (document.hidden || draggedTarget) return;
+    if (document.hidden || draggedTarget || chartSelection || chartCursorDrag) return;
     refreshAll();
   }, 15000);
   document.addEventListener("visibilitychange", () => {
@@ -694,11 +1026,26 @@ document.addEventListener("pathscope-theme-change", () => {
   if (typeof Chart === "undefined") loadCharts();
 });
 windowSelect.addEventListener("change", async () => {
+  clearChartZoomReturnRange();
+  clearChartCursor();
   updateCustomWindowVisibility();
   await refreshAll();
 });
-applyCustomWindow.addEventListener("click", refreshAll);
-showUnknownHops.addEventListener("change", loadLatestHops);
+applyCustomWindow.addEventListener("click", async () => {
+  clearChartZoomReturnRange();
+  clearChartCursor();
+  await refreshAll();
+});
+resetChartZoomBtn.addEventListener("click", resetChartZoom);
+returnLiveSnapshotBtn.addEventListener("click", () => {
+  clearChartCursor();
+  loadStatusCards();
+});
+toggleAlertsBtn.addEventListener("click", () => {
+  alertsMinimized = !alertsMinimized;
+  renderRecentAlerts();
+});
+showUnknownHops.addEventListener("change", renderLatestHops);
 window.addEventListener("resize", () => {
   window.clearTimeout(window.__pathScopePathResizeTimer);
   window.__pathScopePathResizeTimer = window.setTimeout(loadLatestHops, 150);
@@ -708,10 +1055,6 @@ closeHelpBtn.addEventListener("click", () => setHelpOpen(false));
 helpBackdrop.addEventListener("click", () => setHelpOpen(false));
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") setHelpOpen(false);
-});
-toggleAlertsBtn.addEventListener("click", () => {
-  alertsMinimized = !alertsMinimized;
-  renderRecentAlert();
 });
 exportBtn.addEventListener("click", () => {
   const target = targetSelect.value;

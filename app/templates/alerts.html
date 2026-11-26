@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <title>PathScope Alerts</title>
-  <link rel="stylesheet" href="/static/style.css?v=alerts-refresh-1" />
+  <link rel="stylesheet" href="/static/style.css?v=event-history-1" />
   <script src="/static/theme.js?v=compact-header-1" defer></script>
 </head>
 <body>
@@ -18,7 +18,7 @@
     </div>
     <div class="controls">
       <details class="header-menu">
-        <summary aria-label="Open options menu">Options <span aria-hidden="true">⌄</span></summary>
+        <summary aria-label="Open menu">Menu <span aria-hidden="true">⌄</span></summary>
         <div class="header-menu-panel">
           <section class="menu-section">
             <h2>Alerts</h2>
@@ -44,6 +44,7 @@
           </section>
           <nav class="menu-actions" aria-label="Alert actions">
             <a class="button-link" href="/">Dashboard</a>
+            <a class="button-link" href="/events">Events</a>
             <a class="button-link" href="/admin">Admin</a>
             <button id="helpBtn" type="button">Quick help</button>
             <button id="clearAlertsBtn" class="danger" type="button">Clear Alerts</button>
@@ -99,6 +100,7 @@
     <div id="alertsPageList" class="alerts-list alerts-page-list"></div>
   </section>
 
-  <script src="/static/alerts.js?v=alerts-refresh-1"></script>
+  <script src="/static/alert-details.js?v=event-history-1"></script>
+  <script src="/static/alerts.js?v=event-history-1"></script>
 </body>
 </html>

@@ -50,6 +50,7 @@ class Run(Base):
     endpoint_loss_pct = Column(Float, nullable=True)
     endpoint_jitter_ms = Column(Float, nullable=True)
     endpoint_error = Column(Text, nullable=True)
+    incident_context_json = Column(Text, nullable=True)
 
     hops = relationship("Hop", back_populates="run", cascade="all, delete-orphan")
     port_checks = relationship("PortCheck", back_populates="run", cascade="all, delete-orphan")
@@ -70,6 +71,8 @@ class Hop(Base):
     worst_ms = Column(Float, nullable=True)
     stdev_ms = Column(Float, nullable=True)
     asn = Column(String, nullable=True)
+    asn_source = Column(String, nullable=True)
+    bgp_prefix = Column(String, nullable=True)
     org = Column(String, nullable=True)
     country = Column(String, nullable=True)
     city = Column(String, nullable=True)
@@ -139,6 +142,8 @@ def _migrate_sqlite() -> None:
             conn.exec_driver_sql("ALTER TABLE runs ADD COLUMN endpoint_jitter_ms FLOAT")
         if "endpoint_error" not in columns:
             conn.exec_driver_sql("ALTER TABLE runs ADD COLUMN endpoint_error TEXT")
+        if "incident_context_json" not in columns:
+            conn.exec_driver_sql("ALTER TABLE runs ADD COLUMN incident_context_json TEXT")
         if "reverse_dns_name" not in columns:
             conn.exec_driver_sql("ALTER TABLE runs ADD COLUMN reverse_dns_name TEXT")
         if "reverse_dns_match" not in columns:
@@ -155,6 +160,11 @@ def _migrate_sqlite() -> None:
             conn.exec_driver_sql("ALTER TABLE runs ADD COLUMN dns_sinkhole_match BOOLEAN")
         if "dns_sinkhole_range" not in columns:
             conn.exec_driver_sql("ALTER TABLE runs ADD COLUMN dns_sinkhole_range TEXT")
+        hop_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(hops)").fetchall()}
+        if "asn_source" not in hop_columns:
+            conn.exec_driver_sql("ALTER TABLE hops ADD COLUMN asn_source TEXT")
+        if "bgp_prefix" not in hop_columns:
+            conn.exec_driver_sql("ALTER TABLE hops ADD COLUMN bgp_prefix TEXT")
         alert_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(alert_events)").fetchall()}
         if "details" not in alert_columns:
             conn.exec_driver_sql("ALTER TABLE alert_events ADD COLUMN details TEXT")
